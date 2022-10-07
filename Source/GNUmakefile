@@ -60,7 +60,7 @@ SOURCES = a65816_Code.c a65816_Cond.c a65816_Data.c a65816_File.c \
 OBJECTS=$(SOURCES:.c=.o)
 
 $(TARGET): $(OBJECTS) $(BIN_CONFIG)
-	$(CC) $(OBJECTS) -o $@
+	$(CC) $(CFLAGS) $(OBJECTS) -o $@
 
 $(BIN_CONFIG):
 	echo PREFIX=$(PREFIX) > $(BIN_CONFIG)
