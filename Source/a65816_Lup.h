@@ -1,9 +1,9 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_Lup.h : Header for Lup Management.                          */
+/*  a65816_Lup.h : Header pour la gestion des Lup.                     */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
 int ReplaceLupWithCode(struct omf_segment *);

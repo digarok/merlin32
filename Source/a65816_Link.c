@@ -1,14 +1,19 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_Link.c : Assembly / Linkage module of a 65c816 source.      */
+/*  a65816_Link.c : Module d'Assemblage / Linkage d'un source 65c816.  */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <setjmp.h>
+#include <stdint.h>
+
 /** Platform dependent code **/
-/* MSVC only defines _WIN32 */
-#if defined(_WIN32) || defined(WIN32) || defined(WIN64)
+#if defined(WIN32) || defined(WIN64)
 /* Windows */
 #else
 /* Linux + MacOS */
@@ -16,1128 +21,1415 @@
 #endif
 
 #include "Dc_Library.h"
-
-#include "a65816_Link.h"
-
+#include "a65816_Line.h"
+#include "a65816_Macro.h"
+#include "a65816_OMF.h"
 #include "a65816_File.h"
 #include "a65816_Lup.h"
 #include "a65816_Cond.h"
 #include "a65816_Code.h"
 #include "a65816_Data.h"
-#include "a65816_OMF.h"
+#include "a65816_Link.h"
 
-static int Assemble65c816Segment(struct omf_project *,struct omf_segment *,char *);
+static int AssembleLink65c816MasterFile(char *,int);
+static int AssembleLink65c816LinkFile(struct source_file *,char *,int);
+static int AssembleLinkOMFMonoFile(struct omf_project *,int);
+static int AssembleLinkFixedAddressMultiFile(struct omf_project *,int);
+static int Assemble65c816Segment(struct omf_project *,struct omf_segment *);
 static int Link65c816Segment(struct omf_project *, struct omf_segment *);
 static int IsLinkFile(struct source_file *);
 static struct omf_project *BuildSingleSegment(char *);
 static struct omf_project *BuildLinkFile(struct source_file *);
+static void GetSourceFileDirective(char *,char *,char *,char *,int);
 
-/*********************************************************************/
-/*  AssembleLink65c816() :  Assembles and Links source files 65c816. */
-/*********************************************************************/
-int AssembleLink65c816(char *master_file_path, char *macro_folder_path, int verbose_mode, int symbol_mode)
+
+/**************************************************************************/
+/*  AssembleLink65c816() :  Assemble et Links des fichiers source 65c816. */
+/**************************************************************************/
+int AssembleLink65c816(char *master_file_path, int verbose_mode)
 {
-    int error = 0, is_link_file = 0, org_offset = 0;
-    char file_name[1024] = "";
-    char file_error_path[1024+16];
-    struct source_file *master_file = NULL;
-    struct omf_project *current_omfproject = NULL;
-    struct omf_segment *current_omfsegment = NULL;
-    struct omf_segment *tmp_omfsegment = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM, &param, NULL, NULL);
+  int error, is_link_file;
+  char file_name[1024];
+  char file_error_path[1024];
+  struct source_file *master_link_file;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* File name */
-    strcpy(file_name,master_file_path);
-    for(int i=(int)strlen(master_file_path); i>=0; i--)
-        if(master_file_path[i] == '\\' || master_file_path[i] == '/')
+  /* Init : Pas de Segment courrant */
+  my_Memory(MEMORY_SET_CURR_ERROR_SEGMENT,NULL,NULL,NULL);
+  
+  /* Reset Fichier <ProjectFolderPath>Error_Output.txt */
+  sprintf(file_error_path,"%serror_output.txt",param->project_folder_path);
+  unlink(file_error_path);
+
+  /* Extrait le Nom du fichier du chemin */
+  GetNameFromPath(master_file_path,file_name);
+
+  /** Charge en mémoire le fichier principal (Master Source ou Link File) **/
+  master_link_file = LoadOneSourceFile(master_file_path,file_name,0);
+  if(master_link_file == NULL)
+    {
+      sprintf(param->buffer_error,"Impossible to load Master Source file '%s'",master_file_path);
+      my_RaiseError(ERROR_RAISE,param->buffer_error);
+    }
+
+  /** Est-ce un fichier Link ou un ficher Source Master ? **/
+  is_link_file = IsLinkFile(master_link_file);
+  if(is_link_file == 0)
+    {
+      /** Assemble + Link les fichiers source d'un Master (OMF ou Fixed Address / Mono Segment / Mono File) **/
+      error = AssembleLink65c816MasterFile(master_file_path,verbose_mode);
+    }
+  else
+    {
+      /** Assemble + Link les fichiers venant d'un Link file (OMF ou Fixed Address / Mono ou Multi Segment / Mono ou Multi File) **/
+      error = AssembleLink65c816LinkFile(master_link_file,master_file_path,verbose_mode);
+    }
+
+  /* Code Erreur */
+  return(error);
+}
+
+
+/************************************************************************************************/
+/*  AssembleLink65c816MasterFile() :  Assemble et Links des fichiers d'un Master source 65c816. */
+/************************************************************************************************/
+static int AssembleLink65c816MasterFile(char *master_file_path, int verbose_mode)
+{
+  int error;
+  struct omf_project *current_omfproject;
+  char buffer_typ[1024];
+  char buffer_dsk[1024];
+  char buffer_org[1024];
+  char buffer_name[1024];
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /** Création d'1 OMF Project + 1 OMF File + 1 OMF Segment **/
+  current_omfproject = BuildSingleSegment(master_file_path);
+  if(current_omfproject == NULL)
+    {
+      sprintf(param->buffer_error,"Impossible to allocate memory to process Master Source file '%s'",master_file_path);
+      my_RaiseError(ERROR_RAISE,param->buffer_error);
+    }
+
+  /** Recherche les Directives TYP / DSK / ORG dans les sources **/
+  GetSourceFileDirective(master_file_path,buffer_typ,buffer_dsk,buffer_org,1);
+
+  /* TYP Directive */
+  if(strlen(buffer_typ) == 0)
+    {
+      printf("  Error, Can't find output file Type in Source files (use TYP directive).\n");
+      mem_free_omfproject(current_omfproject);
+      return(1);
+    }
+  current_omfproject->type = GetByteValue(buffer_typ);
+  current_omfproject->has_type = 1;
+
+  /** Project Type **/
+  if(current_omfproject->type >= 0xB2 && current_omfproject->type <= 0xBD)
+    {
+      /* OMF v2.1 / Mono Segment / Mono File */
+      current_omfproject->project_type      = PROJECT_TYPE_MONO_SEG_RELOC_ADDR;
+      current_omfproject->address_type      = ADDRESS_TYPE_RELATIVE_OMF;
+      current_omfproject->merge_fa_segments = 0;
+    }
+  else
+    {
+      /* Fixed Address / Mono Segment / Mono File */
+      current_omfproject->project_type      = PROJECT_TYPE_MONO_FILE_FIXED_ADDR;
+      current_omfproject->address_type      = ADDRESS_TYPE_FIXED;
+      current_omfproject->merge_fa_segments = 0;
+      current_omfproject->express_load      = 0;
+    }
+
+  /* DSK Directive */
+  if(strlen(buffer_dsk) > 0)
+    strcpy(buffer_name,buffer_dsk);
+  else
+    {
+      printf("  Error, Can't find output file Name in Source files (use DSK directive).\n");
+      mem_free_omfproject(current_omfproject);
+      return(1);
+    }
+
+  /** Name of the output file **/
+  current_omfproject->first_file->dsk_path = BuildProjectFilePath(buffer_name,"DSK");
+  if(current_omfproject->first_file->dsk_path == NULL)
+    {
+      printf("  Error, Impossible to allocate memory for Output File Path.\n");
+      mem_free_omfproject(current_omfproject);
+      return(1);
+    }
+  current_omfproject->first_file->dsk_name = BuildProjectFileName(current_omfproject->first_file->dsk_path);
+  if(current_omfproject->first_file->dsk_name == NULL)
+    {
+      printf("  Error, Impossible to allocate memory.\n");
+      mem_free_omfproject(current_omfproject);
+      return(1);
+    }
+
+  /* ORG Directive */
+  if(current_omfproject->project_type == PROJECT_TYPE_MONO_FILE_FIXED_ADDR)
+    {
+      /* Décode la valeur */
+      if(strlen(buffer_org) > 0)
         {
-            strcpy(file_name,&master_file_path[i+1]);
-            break;
+          current_omfproject->first_file->org_address = GetDwordValue(buffer_org);
+          if(current_omfproject->first_file->org_address > 0xFFFFFF)
+            {
+              printf("  Error, Invalid ORG value in Source files : %X.\n",(int)current_omfproject->first_file->org_address);
+              mem_free_omfproject(current_omfproject);
+              return(1);
+            }
+        }
+      else
+        current_omfproject->first_file->org_address = 0x000000;     /* Sans ORG dans le Source, on assemble en $00/0000 */
+    }
+  else
+    current_omfproject->first_file->org_address = 0x000000;        /* Pour les OMF, on assemble en $00/0000 */
+
+  /** Assemble + Link Source files **/
+  if(current_omfproject->project_type == PROJECT_TYPE_MONO_SEG_RELOC_ADDR)
+    error = AssembleLinkOMFMonoFile(current_omfproject,verbose_mode);
+  else
+    error = AssembleLinkFixedAddressMultiFile(current_omfproject,verbose_mode);
+
+  /* Libération mémoire : OMF Project + OMF File + OMF Segment */
+  printf("  + Free ressources...\n");
+  mem_free_omfproject(current_omfproject);
+  my_Memory(MEMORY_SET_CURR_ERROR_SEGMENT,NULL,NULL,NULL);
+  my_File(FILE_CLOSE_DIRECTORY,NULL);
+
+  /* OK */
+  return(error);
+}
+
+
+/************************************************************************************************/
+/*  AssembleLink65c816LinkFile() :  Assemble et Link des fichiers source 65c816 d'un Link File. */
+/************************************************************************************************/
+static int AssembleLink65c816LinkFile(struct source_file *link_file, char *master_file_path, int verbose_mode)
+{
+  int error;
+  struct omf_project *current_omfproject;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /** Multi Segments : Assemble + Link tous les Segments **/
+  printf("  + Loading Link file...\n");
+
+  /** Chargement du fichier Link : 1 OMF Project + N OMF Segment **/
+  current_omfproject = BuildLinkFile(link_file);
+  if(current_omfproject == NULL)
+    {
+      mem_free_sourcefile(link_file,1);
+      sprintf(param->buffer_error,"Impossible to load Link file '%s'",master_file_path);
+      my_RaiseError(ERROR_RAISE,param->buffer_error);
+    }
+
+  /* Libération mémoire */
+  mem_free_sourcefile(link_file,1);
+
+  /** On Assemble + Link en fonction du type de projet **/
+  if(current_omfproject->project_type == PROJECT_TYPE_MONO_SEG_RELOC_ADDR || current_omfproject->project_type == PROJECT_TYPE_MULTI_SEG_RELOC_ADDR)
+    error = AssembleLinkOMFMonoFile(current_omfproject,verbose_mode);
+  else if(current_omfproject->project_type == PROJECT_TYPE_MONO_FILE_FIXED_ADDR || current_omfproject->project_type == PROJECT_TYPE_MULTI_FILE_FIXED_ADDR)
+    error = AssembleLinkFixedAddressMultiFile(current_omfproject,verbose_mode);
+
+  /* Libération mémoire : OMF Project + OMF File + OMF Segment */
+  printf("  + Free ressources...\n");
+  mem_free_omfproject(current_omfproject);
+  my_Memory(MEMORY_SET_CURR_ERROR_SEGMENT,NULL,NULL,NULL);
+  my_File(FILE_CLOSE_DIRECTORY,NULL);
+
+  /* OK */
+  return(error);
+}
+
+
+/***********************************************************************************************************/
+/*  AssembleLinkOMFMonoFile() :  Assemble et Links des fichiers source OMF (Mono/Multi Segment) Mono File. */
+/***********************************************************************************************************/
+static int AssembleLinkOMFMonoFile(struct omf_project *current_omfproject, int verbose_mode)
+{
+  int error, segment_number;
+  struct omf_segment *current_omfsegment;
+  struct omf_file *current_omffile;
+  char file_error_path[1024];
+  char output_file_path[1024];
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /* Un seul fichier pour les OMF */
+  current_omffile = current_omfproject->first_file;
+
+  /* Numéro du Segment [1-N] : On ajoute l'ExpressLoad s'il y a plus de 1 Segment */
+  segment_number = 1;
+  if(current_omfproject->express_load == 1 && current_omffile->nb_segment > 1)
+    segment_number++;
+
+  /*************************************************************/
+  /*** On va enchainer l'assemblage de tous les Segments OMF ***/
+  /*************************************************************/
+  for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+    {
+      /* Init File */
+      my_File(FILE_INIT_DIRECTORY,NULL);
+
+      /* Déclare le Segment OMF courrant en cas d'erreur */
+      my_Memory(MEMORY_SET_CURR_ERROR_SEGMENT,current_omfsegment,NULL,NULL);
+
+      /* Donne un numéro au Segment [1-N] */
+      current_omfsegment->segment_number = segment_number;
+      segment_number++;
+
+      /*** Segment #n : Assemble les fichiers Source + Création du fichier Output.txt pour 1 Segment ***/
+      printf("  + Assemble project files for Segment #%02X :\n",current_omfsegment->segment_number);
+      error = Assemble65c816Segment(current_omfproject,current_omfsegment);
+      if(error)
+        {
+          /* Création du nom du fichier Output Error */
+          sprintf(file_error_path,"%s%s_S%02X_%s_Output_Error.txt",param->project_folder_path,current_omffile->dsk_name,current_omfsegment->segment_number,current_omfsegment->segment_name);
+
+          /* Création du fichier Output Error */
+          CreateTextOutputFile(file_error_path,current_omfsegment,current_omfproject);
+   
+          /* Code Erreur */
+          return(error);
+        }
+    }
+
+  /********************************************************************/
+  /*** On va générer les Segments OMF (Header + Body + Dictionnary) ***/
+  /********************************************************************/
+  for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+    {
+      /*** Segment #n : Link les fichiers Source pour 1 Segment ***/
+      printf("  + Link project files for Segment #%02X...\n",current_omfsegment->segment_number);
+      error = Link65c816Segment(current_omfproject,current_omfsegment);
+      if(error)
+        {
+          /* Code Erreur */
+          return(error);
+        }
+    }
+
+  /** Création+Insertion du Segment ~ExpressLoad pour les OMF ayant plus d'un Segment **/
+  if(current_omfproject->express_load == 1 && current_omfproject->first_file->nb_segment > 1)
+    {
+      printf("  + Build ExpressLoad into Segment #01...\n");
+      error = BuildExpressLoadSegment(current_omfproject);
+      if(error)
+        {
+          /* Code Erreur */
+          return(error);
+        }
+    }
+
+  /***************************************************/
+  /** Create OMF File Mono-Segment / Multi-Segments **/
+  /***************************************************/
+  printf("  + Build OMF output file...\n");
+  BuildOMFFile(param->project_folder_path,current_omfproject);
+
+  /********************************************************/
+  /** Dump as Output Text File + Création fichier Symbol **/
+  /********************************************************/
+  if(verbose_mode)
+    {
+      /* Création du/des fichiers Output Text */
+      printf("  + Create Output Text file%s...\n",(current_omffile->nb_segment == 1)?"":"s");
+                        
+      /** On va créer les fichiers Output.txt de tous les Segments (sauf l'ExpressLoad) **/
+      for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+        {
+          /* On ne Dump pas l'ExpressLoad */
+          if(current_omfsegment->segment_number == 1 && !my_stricmp(current_omfsegment->segment_name,"~ExpressLoad"))
+            continue;
+
+          /* Chemin du fichier _Output.txt */
+          sprintf(output_file_path,"%s%s_S%02X_%s_Output.txt",param->project_folder_path,current_omffile->dsk_name,current_omfsegment->segment_number,current_omfsegment->segment_name);
+
+          /* Création du fichier Output */
+          CreateTextOutputFile(output_file_path,current_omfsegment,current_omfproject);
         }
 
-    /* File Error_Output.txt */
-    snprintf(file_error_path, 1024+16,"%serror_output.txt",param->current_folder_path);
-    unlink(file_error_path);
-
-    /* Allocation of an OMF Temporary Segment */
-    tmp_omfsegment = mem_alloc_omfsegment();
-    if(tmp_omfsegment == NULL)
-    {
-        strcpy(param->buffer_error,"Impossible to allocate memory to build temporary segment structure");
-        my_RaiseError(ERROR_RAISE,param->buffer_error);
-    }
-    my_Memory(MEMORY_SET_OMFSEGMENT,tmp_omfsegment,NULL,NULL);
-
-    /** Load in memory the main file **/
-    master_file = LoadOneSourceFile(master_file_path,file_name,0);
-    if(master_file == NULL)
-    {
-        sprintf(param->buffer_error,"Impossible to load Master Source file '%s'",master_file_path);
-        my_RaiseError(ERROR_RAISE,param->buffer_error);
+      /* Création du fichier Symbols */
+      printf("  + Create Symbols file...\n");
+      CreateSymbolFile(current_omffile->dsk_name,current_omfproject);
     }
 
-    /** Is it a File Link or a Source File **/
-    is_link_file = IsLinkFile(master_file);
-    if(is_link_file == 0)
-    {
-        /* Memory release of File Link */
-        mem_free_sourcefile(master_file,1);
-        mem_free_omfsegment(tmp_omfsegment);
-        my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
+  /* OK */
+  return(0);
+}
 
+
+/***********************************************************************************************************************************/
+/*  AssembleLinkFixedAddressMultiFile() :  Assemble et Links des fichiers source Fixed Address Mono/Multi file Mono/Multi Segment. */
+/***********************************************************************************************************************************/
+static int AssembleLinkFixedAddressMultiFile(struct omf_project *current_omfproject, int verbose_mode)
+{
+  int error, segment_number;
+  DWORD org_offset;
+  struct omf_segment *current_omfsegment;
+  struct omf_file *current_omffile;
+  char output_file_path[1024];
+  char file_error_path[1024];
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /* Init */
+  segment_number = 1;
+
+  /******************************************************************************/
+  /*** On va enchainer l'assemblage de tous les Segments de tous les Fichiers ***/
+  /******************************************************************************/
+  for(current_omffile=current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+    for(org_offset = 0,current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+      {
         /* Init File */
-        my_File(FILE_INIT,NULL);
+        my_File(FILE_INIT_DIRECTORY,NULL);
 
-        /** Creation of 1 omf_header + 1 omf_segment **/
-        current_omfproject = BuildSingleSegment(master_file_path);
-        if(current_omfproject == NULL)
-        {
-            sprintf(param->buffer_error,"Impossible to allocate memory to process Master Source file '%s'",master_file_path);
-            my_RaiseError(ERROR_RAISE,param->buffer_error);
-        }
+        /* Déclare le Segment OMF courrant (en cas d'erreur) */
+        my_Memory(MEMORY_SET_CURR_ERROR_SEGMENT,current_omfsegment,NULL,NULL);
 
-        /* Declares the current OMF Segment */
-        my_Memory(MEMORY_SET_OMFSEGMENT,current_omfproject->first_segment,NULL,NULL);
+        /* Donne un numéro au Segment [1-N] */
+        current_omfsegment->segment_number = segment_number;
+        segment_number++;
 
-        /*** Mono Segment: Assembles Source Files + Creation of File Output.txt for 1 Segment ***/
-        printf("  + Assemble project files...\n");
-        error = Assemble65c816Segment(current_omfproject,current_omfproject->first_segment,macro_folder_path);
+        /* Donne une adresse ORG pour les fichiers dont les Fixed-Address Segments sont collés les uns aux autres */
+        if(current_omfproject->merge_fa_segments == 1)
+          {
+            current_omfsegment->has_org_address = 1;
+            current_omfsegment->org_address = current_omffile->org_address + org_offset;
+          }
+
+        /*** Segment #n : Assemble les fichiers Source + Création du fichier Output.txt pour 1 Segment ***/
+        printf("  + Assemble project files for Segment #%02X :\n",current_omfsegment->segment_number);
+        error = Assemble65c816Segment(current_omfproject,current_omfsegment);
         if(error)
-        {
-            /* Creation of the File Output */
-            CreateOutputFile(file_error_path, 0, 0, current_omfproject->first_segment, current_omfproject);
+          {
+            /* Création du nom du fichier Output Error */
+            sprintf(file_error_path,"%s%s_S%02X_%s_Output_Error.txt",param->project_folder_path,current_omffile->dsk_name,current_omfsegment->segment_number,current_omfsegment->segment_name);
 
-            /* Memory release */
-            mem_free_omfproject(current_omfproject);
-            my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-            my_File(FILE_FREE,NULL);
-
-            /* Code Error */
+            /* Création du fichier Output */
+            CreateTextOutputFile(file_error_path,current_omfsegment,current_omfproject);
+  
+            /* Code Erreur */
             return(error);
-        }
-
-        /*** Mono Segment: Link the Source Files for 1 Segment ***/
-        printf("  + Link project files...\n");
-        error = Link65c816Segment(current_omfproject,current_omfproject->first_segment);
-        if(error)
-        {
-            /* Memory release: OMF Project + OMF Segment */
-            mem_free_omfproject(current_omfproject);
-            my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-            my_File(FILE_FREE,NULL);
-
-            /* Code Error */
-            return(error);
-        }
-
-        /** Create OMF File / Binary File **/
-        if(current_omfproject->first_segment->is_omf == 1)
-        {
-            /* OMF Mono Segment */
-            printf("    o Build OMF output file...\n");
-            BuildOMFFile(param->current_folder_path,current_omfproject);
-        }
-        else
-        {
-            /* Fixed address binary */
-            printf("    o Build Binary output file...\n");
-            BuildObjectFile(param->current_folder_path,current_omfproject->first_segment,current_omfproject);
-        }
-
-        /** Dump Code as Output Text File **/
-        if(verbose_mode >= 0)
-        {
-            /* File name _Output.txt */
-            sprintf(param->output_file_path,"%s%s_Output.txt",param->current_folder_path,current_omfproject->first_segment->object_name);         /* Mono Segment */
-
-            /* Create the Output File */
-            printf("  + Create Output Text file...\n");
-            CreateOutputFile(param->output_file_path, verbose_mode, symbol_mode, current_omfproject->first_segment, current_omfproject);
-        }
-
-        /* Memory release */
-        mem_free_omfproject(current_omfproject);
-        my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-        my_File(FILE_FREE,NULL);
-    }
-    else
-    {
-        /** Multi Segments: Assemble + Link all Segments **/
-        printf("  + Loading Link file...\n");
-
-        /** Loading the File Link: 1 omh_hearder + N omf_segment **/
-        current_omfproject = BuildLinkFile(master_file);
-        if(current_omfproject == NULL)
-        {
-            mem_free_sourcefile(master_file,1);
-            sprintf(param->buffer_error,"Impossible to load Link file '%s'",master_file_path);
-            my_RaiseError(ERROR_RAISE,param->buffer_error);
-        }
-
-        /* Memory release */
-        mem_free_sourcefile(master_file,1);
-
-        /*** We will chain the assembly of all the Segments ***/
-        current_omfsegment=current_omfproject->first_segment;
-        for(int i=0; current_omfsegment; current_omfsegment=current_omfsegment->next,i++)
-        {
-            /* Init File */
-            my_File(FILE_INIT,NULL);
-
-            /* Declares the current OMF Segment */
-            my_Memory(MEMORY_SET_OMFSEGMENT,current_omfsegment,NULL,NULL);
-
-            /* Gives a number to the Segment (decal in case of ExpressLoad) */
-            current_omfsegment->segment_number = i + 1 + ((current_omfproject->express_load == 1 && current_omfproject->nb_segment > 1) ? 1 : 0);
-
-            /* Gives an ORG address for Fixed-Address Single-Binary */
-            if(current_omfproject->is_single_binary == 1)
-            {
-                current_omfsegment->has_org_address = 1;
-                current_omfsegment->org_address = current_omfproject->org_address_tab[current_omfsegment->file_number-1] + org_offset;
-            }
-
-            /*** Segment #n: Assembles Source Files + Create the Output File.txt for 1 Segment ***/
-            printf("  + Assemble project files for Segment #%02X :\n",current_omfsegment->segment_number);
-            error = Assemble65c816Segment(current_omfproject,current_omfsegment,macro_folder_path);
-            if(error)
-            {
-                /* Create the Output File */
-                CreateOutputFile(file_error_path, 0, 0, current_omfsegment, current_omfproject);
-
-                /* Memory release : OMF Project + OMF Segment */
-                mem_free_omfproject(current_omfproject);
-                my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-                my_File(FILE_FREE,NULL);
-
-                /* Code Error */
-                return(error);
-            }
+          }
             
-            /* Update the next segment's ORG Address (for Fixed-Address SingleBinary), then reset to zero between Files */
-            org_offset += current_omfsegment->object_length;
-            if(current_omfsegment->next != NULL)
-                if(current_omfsegment->file_number != current_omfsegment->next->file_number)
-                    org_offset = 0;
-        }
+        /* Met à jour la ORG Address du Segment suivant (pour les Fixed-Address Multi-Segment) */
+        org_offset += current_omfsegment->object_length;
+      }
 
-        /*** We will generate the OMF (Header + Body) or Fixed Address Segments ***/
-        for(current_omfsegment=current_omfproject->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
-        {
-            /*** Segment #n: Link Source Files for 1 Segment ***/
-            printf("  + Link project files for Segment #%02X...\n",current_omfsegment->segment_number);
-            error = Link65c816Segment(current_omfproject,current_omfsegment);
-            if(error)
-            {
-                /* Memory release : OMF Project + OMF Segment */
-                mem_free_omfproject(current_omfproject);
-                my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-                my_File(FILE_FREE,NULL);
+  /************************************************/
+  /*** On va générer les Segments Fixed Address ***/
+  /************************************************/
+  for(current_omffile=current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+    for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+      {
+        /*** Segment #n : Link les fichiers Source pour 1 Segment ***/
+        printf("  + Link project files for Segment #%02X...\n",current_omfsegment->segment_number);
+        error = Link65c816Segment(current_omfproject,current_omfsegment);
+        if(error)
+          {  
+            /* Code Erreur */
+            return(error);
+          }
+      }
 
-                /* Code Error */
-                return(error);
-            }
-        }
+  /***************************************************************/
+  /** Create Fixed Address Mono/Multi files Mono/Multi Segments **/
+  /***************************************************************/
+  printf("  + Build Binary output file%s...\n",(current_omfproject->nb_file==1)?"":"s");
 
-        /** Create the Segment ~ExpressLoad **/
-        if(current_omfproject->is_multi_fixed != 1 && current_omfproject->express_load == 1 && current_omfproject->nb_segment > 1)
-        {
-            printf("  + Build ExpressLoad into Segment #01...\n");
-            error = BuildExpressLoadSegment(current_omfproject);
-            if(error)
-            {
-                /* Memory release : OMF Project + OMF Segment */
-                mem_free_omfproject(current_omfproject);
-                my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-                my_File(FILE_FREE,NULL);
-                return(error);
-            }
-        }
+  /** Création du/des fichiers Binaire à adresse fixe (groupés ensemble si multi sgements) **/
+  for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile = current_omffile->next)
+    BuildFixedAddressBinaryOutputFile(current_omffile,current_omfproject);
 
-        /** Create OMF File Multi-Segments / OMF File Mono-Segment / Binary Multi-Fixed files **/
-        if(current_omfproject->is_multi_fixed == 1 && current_omfproject->is_single_binary == 0)
-        {
-            /** We will create the Binary Files of all Segments **/
-            printf("  + Build Binary output files...\n");
-            for(current_omfsegment=current_omfproject->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
-            {
-                /* Create the Fixed address binary file */
-                BuildObjectFile(param->current_folder_path,current_omfsegment,current_omfproject);
-            }
-        }
-        else if(current_omfproject->is_multi_fixed == 1 && current_omfproject->is_single_binary == 1)
-        {
-            /** We will create the Binary File of all concatenated Segments **/
-            printf("  + Build Binary output file%s...\n",(current_omfproject->nb_file==1)?"":"s");
+  /******************************/
+  /** Dump as Output Text File **/
+  /******************************/
+  if(verbose_mode)
+    {
+      /** On va créer les fichiers Output.txt de tous les Segments de tous les Fichiers **/
+      printf("  + Create Output Text file%s...\n",(segment_number > 2)?"s":"");
+      for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile = current_omffile->next)
+        for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+          {
+            /* Chemin du fichier _Output.txt */
+            sprintf(output_file_path,"%s%s_S%02X_%s_Output.txt",param->project_folder_path,current_omffile->dsk_name,current_omfsegment->segment_number,current_omfsegment->segment_name);
 
-            /* Create the Files Fixed address binary files and ensemble */
-            for(int i=0; i<current_omfproject->nb_file; i++)
-                BuildSingleObjectFile(param->current_folder_path,i,current_omfproject);
-        }
-        else
-        {
-            /** Create OMF File Multi-Segments (or Mono Segment but with its Link File) **/
-            printf("  + Build OMF output file...\n");
-            BuildOMFFile(param->current_folder_path,current_omfproject);
-        }
+            /* Création du fichier Output */
+            CreateTextOutputFile(output_file_path,current_omfsegment,current_omfproject);
+          }
 
-        /** Dump the Output Text File **/
-        if(verbose_mode >= 0)
-        {
-            /* Create the Output Text file */
-            printf("  + Create Output Text file%s...\n",(current_omfproject->nb_segment == 1)?"":"s");
-
-            /** We will create the Output.txt Files of all the Segments (except the ExpressLoad) **/
-            for(current_omfsegment=current_omfproject->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
-            {
-                /* We do not dump the ExpressLoad */
-                if(current_omfsegment->segment_number == 1 && !my_stricmp(current_omfsegment->segment_name,"~ExpressLoad"))
-                    continue;
-
-                /* File name _Output.txt */
-                if(current_omfproject->nb_segment == 1)                                                                                                 /* Mono Segment */
-                    sprintf(param->output_file_path,"%s%s_Output.txt",param->current_folder_path,current_omfsegment->object_name);
-                else if(current_omfproject->nb_segment > 1 && current_omfproject->is_multi_fixed == 0)                                                  /* Multi Segment OMF */
-                    sprintf(param->output_file_path,"%s%s_S%02X_%s_Output.txt",param->current_folder_path,current_omfproject->dsk_name_tab[0],current_omfsegment->segment_number,current_omfsegment->object_name);
-                else if(current_omfproject->nb_segment > 1 && current_omfproject->is_multi_fixed == 1 && current_omfproject->is_single_binary == 0)     /* Multi Segment Fixed */
-                    sprintf(param->output_file_path,"%s%s_S%02X_Output.txt",param->current_folder_path,(strlen(current_omfsegment->segment_name)==0)?current_omfsegment->object_name:current_omfsegment->segment_name,current_omfsegment->segment_number);
-                else if(current_omfproject->nb_segment > 1 && current_omfproject->is_multi_fixed == 1 && current_omfproject->is_single_binary == 1)     /* Multi Segment Fixed Single Binary */
-                    sprintf(param->output_file_path,"%s%s_S%02X_%s_Output.txt",param->current_folder_path,current_omfproject->dsk_name_tab[current_omfsegment->file_number-1],current_omfsegment->segment_number,(strlen(current_omfsegment->segment_name)==0)?current_omfsegment->object_name:current_omfsegment->segment_name);
-
-                /* Create the Output File */
-                CreateOutputFile(param->output_file_path, verbose_mode, symbol_mode, current_omfsegment, current_omfproject);
-            }
-        }
-
-        /* Memory release : OMF Project + OMF Segment */
-        mem_free_omfproject(current_omfproject);
-        my_Memory(MEMORY_SET_OMFSEGMENT,NULL,NULL,NULL);
-        my_File(FILE_FREE,NULL);
+      /* Création des fichiers Symbols de tous les fichiers */
+      printf("  + Create Symbol files...\n");
+      for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile = current_omffile->next)
+        CreateSymbolFile(current_omffile->dsk_name,current_omfproject);
     }
 
-    /* Code Error */
-    return(error);
+  /* OK */
+  return(0);
 }
 
 
-/*****************************************************************************/
-/*  Assemble65c816Segment() :  Assembles 65c816 Source Files from a Segment. */
-/*****************************************************************************/
-static int Assemble65c816Segment(struct omf_project *current_omfproject, struct omf_segment *current_omfsegment, char *macro_folder_path)
+/*********************************************************************************/
+/*  Assemble65c816Segment() :  Assemble des fichiers source 65c816 d'un Segment. */
+/*********************************************************************************/
+static int Assemble65c816Segment(struct omf_project *current_omfproject, struct omf_segment *current_omfsegment)
 {
-    int error = 0;
-    struct source_file *first_file = NULL;
-    struct source_line *current_line = NULL;
-    struct relocate_address *current_address = NULL;
-    struct relocate_address *next_address = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM, &param, NULL, NULL);
+  int modified, error, first_time, has_error;
+  struct source_file *first_file;
+  struct source_line *current_line;
+  struct relocate_address *current_address;
+  struct relocate_address *next_address;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Init */
-    my_Memory(MEMORY_FREE_EQUIVALENCE,NULL,NULL,current_omfsegment);
+  /* Init */
+  my_Memory(MEMORY_FREE_EQUIVALENCE,NULL,NULL,current_omfsegment);
 
-    /* Initializing the counter of unique labels */
-    GetUNID("INIT=1");
+  /* Initialisation du compteur des labels uniques */
+  GetUNID("INIT=1");
 
-    /* Retrieves the Source Files Directory */
-    GetFolderFromPath(current_omfsegment->master_file_path,param->source_folder_path);
+  /* Récupère le répertoire des fichiers source */
+  GetFolderFromPath(current_omfsegment->master_file_path,param->source_folder_path);
 
-    /* Creating quick lookup tables */
-    BuildReferenceTable(current_omfsegment);
+  /* Création des tables de recherche rapides */
+  BuildReferenceTable(current_omfsegment);
 
-    /** Loading all Source Files / Identifies lines in Comment + Empty **/
-    printf("    o Loading Sources files...\n");
-    LoadAllSourceFile(current_omfsegment->master_file_path,macro_folder_path,current_omfsegment);
+  /** Chargement de tous les fichiers Source / Identifie les lignes en Commentaire + Vide **/
+  printf("    o Loading Sources files...\n");
+  LoadAllSourceFile(current_omfsegment->master_file_path,current_omfsegment);
 
-    /** Loading Macro Files **/
-    printf("    o Loading Macro files...\n");
-    LoadSourceMacroFile(macro_folder_path,current_omfsegment);
+  /** Chargement des fichiers Macro **/
+  printf("    o Loading Macro files...\n");
+  LoadSourceMacroFile(current_omfsegment);
 
-    /** Search for additional Macro defined directly in the Source **/
-    GetMacroFromSource(current_omfsegment);
+  /** Recherche des Macro supplémentaires définies directement dans le Source **/
+  GetMacroFromSource(current_omfsegment);
 
-    /** Sort all Macro **/
-    my_Memory(MEMORY_SORT_MACRO,NULL,NULL,current_omfsegment);
+  /** Tri toutes les Macro **/
+  my_Memory(MEMORY_SORT_MACRO,NULL,NULL,current_omfsegment);
 
-    /** Finding duplicate Macro **/
-    printf("    o Check for duplicated Macros...\n");
-    CheckForDuplicatedMacro(current_omfsegment);
+  /** Recherche des Macro en double **/
+  printf("    o Check for duplicated Macros...\n");
+  CheckForDuplicatedMacro(current_omfsegment);
 
-    /** Determine the type of lines (Code, Macro, Directive, Equivalence ...) **/
-    printf("    o Decoding lines types...\n");
-    my_Memory(MEMORY_GET_FILE,&first_file,NULL,current_omfsegment);
-    error = DecodeLineType(first_file->first_line,NULL,current_omfsegment,current_omfproject);
-    if(error)
-        return(1);
+  /** Détermine le type des lignes (Code, Macro, Directive, Equivalence...) **/
+  printf("    o Decoding lines types...\n");
+  my_Memory(MEMORY_GET_SOURCE_FILE,&first_file,NULL,current_omfsegment);  
+  error = DecodeLineType(first_file->first_line,NULL,current_omfsegment,current_omfproject);
+  if(error)
+    return(1);
 
-    /** Replaces labels :local by unid_ in Code and Macros **/
-    printf("    o Process local Labels...\n");
-    ProcessAllLocalLabel(current_omfsegment);
+  /** Remplace les labels :locaux/]variable par un unid_ dans le Code et les Macros **/
+  printf("    o Process local/variable Labels...\n");
+  ProcessAllLocalLabel(current_omfsegment);
+  ProcessAllVariableLabel(current_omfsegment);
 
-    /** Replaces labels ]variable by unid_ in Code and Macros **/
-    printf("    o Process variable Labels...\n");
-    ProcessAllVariableLabel(current_omfsegment);
+  /** Remplace les * par des Labels dans le Code et les Macros **/
+  printf("    o Process Asterisk lines...\n");
+  error = ProcessAllAsteriskLine(current_omfsegment);
+  if(error)
+    return(1);
 
-    /** Replace * with Labels in Code and Macros **/
-    printf("    o Process Asterisk lines...\n");
-    error = ProcessAllAsteriskLine(current_omfsegment);
-    if(error)
-        return(1);
+  /** Création de la table des External **/
+  printf("    o Build External table...\n");
+  BuildExternalTable(current_omfsegment);
 
-    /** Creation of the External table **/
-    printf("    o Build External table...\n");
-    BuildExternalTable(current_omfsegment);
+  /** Création de la table des Equivalences **/
+  printf("    o Build Equivalence table...\n");
+  BuildEquivalenceTable(current_omfsegment);
 
-    /** Creation of the equivalence table **/
-    printf("    o Build Equivalence table...\n");
-    BuildEquivalenceTable(current_omfsegment);
+  /** Création de la table des variables ]LP **/
+  printf("    o Build Variable table...\n");
+  BuildVariableTable(current_omfsegment);
 
-    /** Creation of the table of variables ]LP **/
-    printf("    o Build Variable table...\n");
-    BuildVariableTable(current_omfsegment);
+  /** Remplace les Equivalences **/
+  printf("    o Process Equivalence values...\n");
+  ProcessEquivalence(current_omfsegment);
 
-    /** Replaces Equivalences **/
-    printf("    o Process Equivalence values...\n");
-    ProcessEquivalence(current_omfsegment);
+  /** Remplace les Macro avec leur code **/
+  printf("    o Replace Macros with Code...\n");
+  error = ReplaceMacroWithContent(current_omfsegment,current_omfproject);
+  if(error)
+    return(1);
 
-    /** Replace Macro with their code **/
-    printf("    o Replace Macros with Code...\n");
-    error = ReplaceMacroWithContent(current_omfsegment,current_omfproject);
-    if(error)
-        return(1);
+  /** Remplace les LUP par la séquence de code (cela vient après les Macro car le param de LUP peut être un des param d'appel de la Macro) **/
+  printf("    o Replace Lup with code...\n");
+  ReplaceLupWithCode(current_omfsegment);
 
-    /** Replaces LUP with code sequence (this comes after Macro because LUP parameter can be one of Macro's call parameters) **/
-    printf("    o Replace Lup with code...\n");
-    ReplaceLupWithCode(current_omfsegment);
+  /** On refait les Equivalences, les Variables et les Remplacements dans le code amené par les Macro et les Loop **/
+  BuildEquivalenceTable(current_omfsegment);
+  BuildVariableTable(current_omfsegment);
+  ProcessEquivalence(current_omfsegment);
 
-    /** We redid Equivalences, Variables and Replacements in the code brought by Macro and Loop **/
-    BuildEquivalenceTable(current_omfsegment);
-    BuildVariableTable(current_omfsegment);
-    ProcessEquivalence(current_omfsegment);
+  /** On va traiter les MX **/
+  printf("    o Process MX directives...\n");
+  ProcessMXDirective(current_omfsegment);
 
-    /** Process MX directives **/
-    printf("    o Process MX directives...\n");
-    ProcessMXDirective(current_omfsegment);
+  /** On va traiter les Conditions **/
+  printf("    o Process Conditional directives...\n");
+  ProcessConditionalDirective(current_omfsegment);
 
-    /** Process Conditional directives **/
-    printf("    o Process Conditional directives...\n");
-    ProcessConditionalDirective(current_omfsegment);
+  /** Création de la table des Labels **/
+  printf("    o Build Label table...\n");
+  BuildLabelTable(current_omfsegment);
 
-    /** Build Label table **/
-    printf("    o Build Label table...\n");
-    BuildLabelTable(current_omfsegment);
+  /** Recherche de Labels/Equivalence déclarés plusieurs fois **/
+  printf("    o Check for duplicated Labels...\n");
+  error = CheckForDuplicatedLabel(current_omfsegment);
+  if(error)
+    return(1);
 
-    /** Check for duplicated Labels **/
-    printf("    o Check for duplicated Labels...\n");
-    error = CheckForDuplicatedLabel(current_omfsegment);
-    if(error)
-        return(1);
+  /** Détecte la liste des lignes inconnues **/
+  printf("    o Check for unknown Source lines...\n");
+  error = CheckForUnknownLine(current_omfsegment);
+  if(error)
+    return(1);
 
-    /** Detect unknown Source lines **/
-    printf("    o Check for unknown Source lines...\n");
-    error = CheckForUnknownLine(current_omfsegment);
-    if(error)
-        return(1);
+  /** Traite les lignes Dum **/
+  printf("    o Check for Dum lines...\n");
+  error = CheckForDumLine(current_omfsegment);
+  if(error)
+    return(1);
 
-    /** Check for Dum lines **/
-    printf("    o Check for Dum lines...\n");
-    error = CheckForDumLine(current_omfsegment);
-    if(error)
-        return(1);
-
-    /**** The automatic detection of the Direct Page forces us to iterate several times ****/
-    printf("    + Building Code Lines:\n");
-    int modified = 1;
-    int has_error = 0;
-    int pass = 0;
-    while(modified == 1 || has_error == 1)
+  /**** La détection automatique du Direct Page nous oblige à itérer plusieurs fois ****/
+  first_time = 1;
+  modified   = 1;
+  has_error  = 0;
+  while(modified == 1 || has_error == 1)
     {
-        printf("      Pass %i...\n", ++pass);
+      /* Erreur lors de la génération du code */
+      strcpy(param->buffer_latest_error,"");
+      has_error = 0;
 
-        /* Error while generating the code */
-        strcpy(param->buffer_latest_error,"");
-        has_error = 0;
+      /*** Génération du code Opcode + Calcul de la Taille pour chaque ligne de Code ***/
+      if(first_time)
+        printf("    o Compute Operand Code size...\n");
+      BuildAllCodeLineSize(current_omfsegment);
 
-        /*** Generation of the Opcode + Size Calculation code for each line of Code ***/
-        printf("      o Compute Operand Code size...\n");
-        BuildAllCodeLineSize(current_omfsegment);
+      /*** Calcul de la taille pour chaque ligne de Data ***/
+      if(first_time)
+        printf("    o Compute Operand Data size...\n");
+      BuildAllDataLineSize(current_omfsegment);
 
-        /*** Calculation of the size for each line of Data ***/
-        printf("      o Compute Operand Data size...\n");
-        BuildAllDataLineSize(current_omfsegment);
+      /*** Calcul les addresses de chaque ligne + Analyse les ORG / OBJ / REL / DUM ***/
+      if(first_time)
+        printf("    o Compute Line address...\n");
+      ComputeLineAddress(current_omfsegment,current_omfproject);
 
-        /*** Calculate the addresses of each line + Analyzes the ORG / OBJ / REL / DUM ***/
-        printf("      o Compute Line address...\n");
-        ComputeLineAddress(current_omfsegment,current_omfproject);
+      /*** Génération du binaire pour les lignes Code (LINE_CODE) ***/
+      if(first_time)
+        printf("    o Build Code Line...\n");
+      BuildAllCodeLine(&has_error,current_omfsegment,current_omfproject);
 
-        /*** Generate Binary for Code Lines (LINE_CODE) ***/
-        printf("      o Build Code Line...\n");
-        BuildAllCodeLine(&has_error,current_omfsegment,current_omfproject);
+      /** Compact Code for Direct Page (sauf si l'adresse est relogeable OMF ) **/
+      if(first_time)
+        printf("    o Compact Code for Direct Page Lines...\n");
+      modified = CompactDirectPageCode(current_omfsegment);
 
-        /** Compact Code for Direct Page (unless the address is relocatable OMF) **/
-        printf("      o Compact Code for Direct Page Lines...\n");
-        modified = CompactDirectPageCode(current_omfsegment);
+      /* Le compact de donne rien et on a une erreur => On sort */
+      if(has_error == 1 && modified == 0)
+        my_RaiseError(ERROR_RAISE,param->buffer_latest_error);
 
-        /* Compact code gives nothing, raise an error condition */
-        if(has_error == 1 && modified == 0)
-            my_RaiseError(ERROR_RAISE,param->buffer_latest_error);
-
-        /** We must redo everything => we will delete all addresses & relocate **/
-        if(modified == 1 || has_error == 1)
+      /** Il faut tout refaire => on va supprimer toutes les adresses à reloger **/
+      if(modified == 1 || has_error == 1)
         {
-            for(current_address=current_omfsegment->first_address; current_address; )
+          for(current_address=current_omfsegment->first_address; current_address; )
             {
-                next_address = current_address->next;
-                free(current_address);
-                current_address = next_address;
+              next_address = current_address->next;
+              free(current_address);
+              current_address = next_address;
             }
-            current_omfsegment->first_address = NULL;
-            current_omfsegment->last_address = NULL;
-            current_omfsegment->nb_address = 0;
+          current_omfsegment->first_address = NULL;
+          current_omfsegment->last_address  = NULL;
+          current_omfsegment->nb_address    = 0;
         }
+
+      /* On a déjà fait un tour */
+      first_time = 0;
     }
-    printf("      Done\n");
 
-    /** We will evaluate the ERR lines **/
-    printf("    o Check for Err lines...\n");
-    error = CheckForErrLine(current_omfsegment);
-    if(error)
-        return(1);
+  /** On va évaluer les lignes ERR **/
+  printf("    o Check for Err lines...\n");
+  error = CheckForErrLine(current_omfsegment);
+  if(error)
+    return(1);
 
-    /** We will check the direct page addresses **/
-    printf("    o Check for Direct Page Lines...\n");
-    error = CheckForDirectPageLine(current_omfsegment);
-    if(error)
-        return(1);
+  /** On va vérifier les adressages Page Direct **/
+  printf("    o Check for Direct Page Lines...\n");
+  error = CheckForDirectPageLine(current_omfsegment);
+  if(error)
+    return(1);
 
-    /*** Binary Generation for Data Lines (LINE_DATA) ***/
-    printf("    o Build Data Line...\n");
-    BuildAllDataLine(current_omfsegment);
+  /*** Génération du binaire pour les lignes Data (LINE_DATA) ***/
+  printf("    o Build Data Line...\n");
+  BuildAllDataLine(current_omfsegment);
 
-    /** Create Object Code (LINE_CODE + LINE_DATA) **/
-    printf("    o Build Object Code...\n");
-    BuildObjectCode(current_omfsegment);
+  /** Create Object Code (LINE_CODE + LINE_DATA) **/
+  printf("    o Build Object Code...\n");
+  BuildObjectCode(current_omfsegment);
 
-    /** Transform directive lines with Label into Empty line **/
-    ProcessDirectiveWithLabelLine(current_omfsegment);
+  /** Transforme les lignes directive avec Label en ligne Vide **/
+  ProcessDirectiveWithLabelLine(current_omfsegment);
 
-    /** If we do not have a Segment Name or Load Name, we use the Master Source directives **/
-    if(current_omfsegment->segment_name == NULL)
-        current_omfsegment->segment_name = strdup(current_omfsegment->object_name);
-    if(current_omfsegment->load_name == NULL)
-        current_omfsegment->load_name = strdup(current_omfsegment->object_name);
-    if(current_omfsegment->segment_name == NULL || current_omfsegment->load_name == NULL)
+  /** Si on est en multi-segment Fixed, il faut faire remonter l'org address du segment **/
+  if(current_omfproject->address_type == ADDRESS_TYPE_FIXED)
     {
-        printf("      => Error, Can't allocate memory...\n");
-        return(1);
+      /* On recherche la première ligne avec qqchose dedans */
+      for(current_line=current_omfsegment->first_file->first_line; current_line; current_line=current_line->next)
+        if(current_line->nb_byte > 0)
+          {
+            current_omfsegment->org = current_line->address;
+            break;
+          }
     }
 
-    /** If in multi-segment Fixed, have to go up the org address of the segment **/
-    if(current_omfproject->is_multi_fixed == 1)
-    {
-        /* Look for the first line with something in it */
-        for(current_line=current_omfsegment->first_file->first_line; current_line; current_line=current_line->next)
-        {
-            if(current_line->nb_byte > 0)
-            {
-                current_omfsegment->org = current_line->address;
-                break;
-            }
-        }
-    }
-
-    /* OK */
-    return(0);
+  /* OK */
+  return(0);
 }
 
 
-/**********************************************************************/
-/*  Link65c816Segment() :  Link the 65c816 Source Files of a Segment. */
-/**********************************************************************/
+/**********************************************************************************************/
+/*  Link65c816Segment() :  Link les fichiers source 65c816 d'un Segment OMF ou Fixed Address. */
+/**********************************************************************************************/
 static int Link65c816Segment(struct omf_project *current_omfproject, struct omf_segment *current_omfsegment)
 {
-    int nb_external = 0;
-    struct label *external_label = NULL;
-    struct relocate_address *current_address = NULL;
-    struct omf_segment *external_omfsegment = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM, &param, NULL, NULL);
+  int nb_external;
+  struct label *external_label;
+  struct relocate_address *current_address;
+  struct omf_file *external_omffile;
+  struct omf_segment *external_omfsegment;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /** We will check that all External used in this segment are solved **/
-    my_Memory(MEMORY_GET_EXTERNAL_NB,&nb_external,NULL,current_omfsegment);
-    if(nb_external > 0)
+  /** On va vérifier que tous les External utilisés de ce segments sont résolus **/
+  my_Memory(MEMORY_GET_EXTERNAL_NB,&nb_external,NULL,current_omfsegment);
+  if(nb_external > 0)
     {
-        /** Check all relocatable addresses **/
-        for(current_address = current_omfsegment->first_address; current_address; current_address=current_address->next)
-            if(current_address->external != NULL)
-                if(current_address->external->external_segment == NULL)
-                {
-                    /** We go through all the Segments to find the Global label associated with this External **/
-                    for(external_omfsegment = current_omfproject->first_segment; external_omfsegment; external_omfsegment = external_omfsegment->next)
-                    {
-                        /* Search a Global Label */
-                        my_Memory(MEMORY_SEARCH_LABEL,current_address->external->name,&external_label,external_omfsegment);
-                        if(external_label != NULL)
-                            if(external_label->is_global == 1)
+      /** On vérifie toutes les adresses relogeables **/
+      for(current_address = current_omfsegment->first_address; current_address; current_address=current_address->next)
+        if(current_address->external != NULL)
+          if(current_address->external->external_segment == NULL)
+            {
+              /** On passe tous les Segments en revue pour trouver le label Global associé à ce External **/
+              for(external_omffile = current_omfproject->first_file; external_omffile; external_omffile = external_omffile->next)
+                for(external_omfsegment = external_omffile->first_segment; external_omfsegment; external_omfsegment = external_omfsegment->next)
+                  {
+                    /* Recherche un Label Global */
+                    my_Memory(MEMORY_SEARCH_LABEL,current_address->external->name,&external_label,external_omfsegment);
+                    if(external_label != NULL)
+                      if(external_label->is_global == 1)
+                        {
+                          /* Si on en a déjà trouvé un, c'est qu'il existe au moins 2 Label Global s'appelant pareil => Erreur */
+                          if(current_address->external->external_segment != NULL)
                             {
-                                /* If we have already found one, it means that there is at least 2 Global Label with the same name => Error */
-                                if(current_address->external->external_segment != NULL)
-                                {
-                                    printf("     => Error : We have found 2 External Labels with the same name '%s' (File '%s', Line %d).\n",current_address->external->name,external_label->line->file->file_path,external_label->line->file_line_number);
-                                    return(1);
-                                }
-
-                                /* We keep the one */
-                                current_address->external->external_segment = external_omfsegment;
-                                current_address->external->external_label = external_label;
+                              printf("     => Error : We have found 2 External Labels with the same name '%s' (File '%s', Line %d).\n",current_address->external->name,external_label->line->file->file_path,external_label->line->file_line_number);
+                              return(1);
                             }
-                    }
-
-                    /** We could not find the Segment containing this External Label :-( **/
-                    if(current_address->external->external_segment == NULL)
-                    {
-                        printf("     => Error : Can't find External Label named '%s' (File '%s', Line %d).\n",current_address->external->name,current_address->external->source_line->file->file_path,current_address->external->source_line->file_line_number);
-                        return(1);
-                    }
-                }
+                        
+                          /* On conserve celui là */
+                          current_address->external->external_segment = external_omfsegment;
+                          current_address->external->external_label = external_label;
+                        }
+                  }
+  
+              /** On n'a pas pu trouver le Segment contenant ce Label externe :-( **/
+              if(current_address->external->external_segment == NULL)
+                {
+                  printf("     => Error : Can't find External Label named '%s' (File '%s', Line %d).\n",current_address->external->name,current_address->external->source_line->file->file_path,current_address->external->source_line->file_line_number);
+                  return(1);
+                }            
+            }
     }
 
-    /** Size of the Body of the Segment (we take wider for the OMF) **/
-    if(current_omfproject->is_multi_fixed == 1)
-        current_omfsegment->segment_body_length = current_omfsegment->object_length;
-    else
-        current_omfsegment->segment_body_length = 1024 + current_omfsegment->object_length + CRECORD_SIZE*current_omfsegment->nb_address + END_SIZE;
+  /** Taille du Body du Segment (on prend plus large pour l'OMF) **/
+  if(current_omfproject->address_type == ADDRESS_TYPE_FIXED)
+    current_omfsegment->segment_body_length = current_omfsegment->object_length;
+  else
+    current_omfsegment->segment_body_length = 1024 + current_omfsegment->object_length + CRECORD_SIZE*current_omfsegment->nb_address + END_SIZE;
 
-    /** Allocate memory Segment Body **/
-    current_omfsegment->segment_body_file = (unsigned char *) calloc(current_omfsegment->segment_body_length,sizeof(unsigned char));
-    if(current_omfsegment->segment_body_file == NULL)
+  /** Allocation mémoire Segment Body **/
+  current_omfsegment->segment_body_file = (unsigned char *) calloc(current_omfsegment->segment_body_length,sizeof(unsigned char));
+  if(current_omfsegment->segment_body_file == NULL)
     {
-        printf("     => Error : Can't allocate memory to build Body File buffer.\n");
-        return(1);
+      printf("     => Error : Can't allocate memory to build Body File buffer.\n");
+      return(1);
     }
 
-    /** Create the Segment Body **/
-    if(current_omfproject->is_multi_fixed == 1)
+  /** Création du Segment Body **/
+  if(current_omfproject->address_type == ADDRESS_TYPE_FIXED)
     {
-        /* Relocate fixed external addresses */
-        RelocateExternalFixedAddress(current_omfsegment);
-
-        /* Conserve le code objet */
-        memcpy(current_omfsegment->segment_body_file,current_omfsegment->object_code,current_omfsegment->object_length);
+      /* Reloge les adresses externes fixed */
+      RelocateExternalFixedAddress(current_omfproject,current_omfsegment);
+      
+      /* Conserve le code objet */
+      memcpy(current_omfsegment->segment_body_file,current_omfsegment->object_code,current_omfsegment->object_length);
     }
-    else
-        current_omfsegment->body_length = BuildOMFBody(current_omfsegment);
+  else
+    current_omfsegment->body_length = BuildOMFBody(current_omfproject,current_omfsegment);
 
-    /* Create the Segment Header */
-    if(current_omfproject->is_multi_fixed == 1)
-        current_omfsegment->header_length = 0;
-    else
-        current_omfsegment->header_length = BuildOMFHeader(current_omfsegment);
+  /* Création du Segment Header */
+  if(current_omfproject->address_type == ADDRESS_TYPE_FIXED)
+    current_omfsegment->header_length = 0;
+  else
+    current_omfsegment->header_length = BuildOMFHeader(current_omfproject,current_omfsegment);
 
-    /* OK */
-    return(0);
+  /* OK */
+  return(0);
 }
 
 
 /************************************************************************/
-/*  IsLinkFile() :  Determine if the source file is a link file.        */
-/*  IsLinkFile() :  DÃ©termine si un fichier Source est un fichier Link. */
+/*  IsLinkFile() :  Détermine si un fichier Source est un fichier Link. */
 /************************************************************************/
 static int IsLinkFile(struct source_file *master_file)
 {
-    int found = 0;
-    struct source_line *current_line = NULL;
-    /* Opcodes exclusive to link files  */
-    /* Opcode exclusifs au fichier Link */
-    char *opcode_link[] = {"AUX","XPL","ASM","KND","ALI","LNA","SNA","BSZ",NULL};      
+  int i, nb_link_opcode, nb_total_opcode;
+  struct source_line *current_line;
+  char *opcode_link[] = {"DSK","TYP","AUX","XPL","ASM","DS","KND","ALI","LNA","SNA","ORG","BSZ",NULL};      /* Opcode exclusifs au fichier Link (sauf DSK et TYP) */
 
-    /* Valid File? */
-    if(master_file->first_line == NULL)
-        return(0);
+  /* Init */
+  nb_link_opcode = 0;
+  nb_total_opcode = 0;
 
-    /** Pass all lines in to review **/
-    for(current_line = master_file->first_line; current_line; current_line = current_line->next)
+  /* Fichier vide ? */
+  if(master_file->first_line == NULL)
+    return(0);
+
+  /** On passe toutes les lignes en revue **/
+  for(current_line = master_file->first_line; current_line; current_line = current_line->next)
     {
-        /* Comment / Empty */
-        if(current_line->type == LINE_COMMENT || current_line->type == LINE_EMPTY)
-            continue;
+      /* Commentaire / Vide */
+      if(current_line->type == LINE_COMMENT || current_line->type == LINE_EMPTY)
+        continue;
 
-        /* Recognize Link Opcode */
-        for(int i=0; opcode_link[i]!=NULL; i++)
-        {
-            if(!my_stricmp(current_line->opcode_txt,opcode_link[i]))
-            {
-                found = 1;
-                break;
-            }
-        }
-        if(found)
+      /* Reconnait les Opcode du Link */
+      for(i=0; opcode_link[i] != NULL; i++)
+        if(!my_stricmp(current_line->opcode_txt,opcode_link[i]))
+          {
+            nb_link_opcode++;
             break;
+          }
+      nb_total_opcode++;
     }
 
-    return(found);
+  /* KO */
+  if(nb_total_opcode == 0)
+    return(0);
+
+  /* OK */
+  return((nb_link_opcode == nb_total_opcode) ? 1 : 0);
 }
 
 
 /************************************************************/
-/* BuildSingleSegment() : Creation of a single-segment OMF. */
+/*  BuildSingleSegment() :  Création d'un OMF mono-Segment. */
 /************************************************************/
 static struct omf_project *BuildSingleSegment(char *master_file_path)
 {
-    /* OMF Header */
-    struct omf_project *current_omfproject = (struct omf_project *) calloc(1,sizeof(struct omf_project));
-    if(current_omfproject == NULL)
-        return(NULL);
+  struct omf_project *current_omfproject;
+  struct omf_file *current_omffile;
+  struct omf_segment *current_omfsegment;
+  
+  /* OMF Header */
+  current_omfproject = (struct omf_project *) calloc(1,sizeof(struct omf_project));
+  if(current_omfproject == NULL)
+    return(NULL);
 
-    /** OMF Segment **/
-    current_omfproject->nb_segment = 1;
-    current_omfproject->first_segment = mem_alloc_omfsegment();
-    if(current_omfproject->first_segment == NULL)
+  /** 1 OMF File **/
+  current_omffile = mem_alloc_omffile("");
+  if(current_omffile == NULL)
     {
-        mem_free_omfproject(current_omfproject);
-        return(NULL);
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
     }
-    current_omfproject->first_segment->master_file_path = strdup(master_file_path);
-    if(current_omfproject->first_segment->master_file_path == NULL)
+  current_omfproject->nb_file    = 1;
+  current_omfproject->first_file = current_omffile;
+  current_omfproject->last_file  = current_omffile;
+
+  /** 1 OMF Segment **/
+  current_omfsegment = mem_alloc_omfsegment("Segment1");
+  if(current_omfsegment == NULL)
     {
-        mem_free_omfproject(current_omfproject);
-        return(NULL);
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
+    }
+  current_omffile->nb_segment    = 1;
+  current_omffile->first_segment = current_omfsegment;
+  current_omffile->last_segment  = current_omfsegment;
+
+  /* Chemin du Master Source file */
+  current_omfsegment->master_file_path = strdup(master_file_path);
+  if(current_omfsegment->master_file_path == NULL)
+    {
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
     }
 
-    /* In mono-segment, there is no ExpressLoad, the first segment has the number 1 */
-    current_omfproject->first_segment->segment_number = 1;
+  /* En mono-Segment OMF, il n'y a pas d'ExpressLoad, le premier segment a le numéro 1 (idem pour les Fixed Address) */
+  current_omfsegment->segment_number = 1;  
 
-    /* Return the structure */
-    return(current_omfproject);
+  /* Renvoi la structure */
+  return(current_omfproject);
 }
 
 
-/**************************************************/
-/*  BuildLinkFile() :  Retrieving File Link Data. */
-/**************************************************/
+/*************************************************************/
+/*  BuildLinkFile() :  Récupère les données du fichier Link. */
+/*************************************************************/
 static struct omf_project *BuildLinkFile(struct source_file *link_file)
 {
-    struct omf_project *current_omfproject = NULL;
-    struct omf_segment *new_omfsegment = NULL;
-    struct omf_segment *current_omfsegment = NULL;
-    struct source_line *current_line = NULL;
-    char **dsk_name_tab = NULL;
-    DWORD *org_address_tab = NULL;
-    DWORD *file_size_tab = NULL;
-    char file_path[1024];
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM, &param, NULL, NULL);
+  struct omf_project *current_omfproject;
+  struct omf_file *current_omffile;
+  struct omf_segment *current_omfsegment;
+  struct source_line *current_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* OMF Header allocation */
-    current_omfproject = (struct omf_project *) calloc(1,sizeof(struct omf_project));
-    if(current_omfproject == NULL)
+  /* Allocation mémoire OMF Project */
+  current_omfproject = (struct omf_project *) calloc(1,sizeof(struct omf_project));
+  if(current_omfproject == NULL)
     {
-        printf("     => Error, Impossible to allocate memory to process Link file.\n");
-        return(NULL);
+      printf("     => Error, Impossible to allocate memory to process Link file.\n");
+      return(NULL);
     }
 
-    /* Default values */
-    current_omfproject->type = 0xB3;          /* GS/OS Application */
-    current_omfproject->aux_type = 0x0000;
-
-    /*** Pass all the lines of the Link File in review ***/
-    for(current_line = link_file->first_line; current_line; current_line = current_line->next)
+  /*****************************************************/
+  /*** Passe toutes les lignes du Link File en revue ***/
+  /*****************************************************/
+  for(current_line = link_file->first_line; current_line; current_line = current_line->next)
     {
-        /* Comment / Empty */
-        if(current_line->type == LINE_COMMENT || current_line->type == LINE_EMPTY)
-            continue;
+      /* Commentaire / Vide */
+      if(current_line->type == LINE_COMMENT || current_line->type == LINE_EMPTY)
+        continue;
 
-        /** New Header **/
-        /** TYP: File type **/
-        if(!my_stricmp(current_line->opcode_txt,"TYP"))
+      /********************/
+      /** Nouveau Header **/
+      /********************/
+      /** TYP : Type du fchier **/
+      if(!my_stricmp(current_line->opcode_txt,"TYP"))
         {
-            /* Decode the value */
-            current_omfproject->type = GetByteValue(current_line->operand_txt);
-            continue;
+          /* Décode les Alias Ascii (S16 pour $B3) */
+          DecodeDirectiveTYP(current_line->operand_txt);
+
+          /* Décode la valeur */
+          current_omfproject->type = GetByteValue(current_line->operand_txt);
+          current_omfproject->has_type = 1;
+          continue;
         }
         
-        /** Aux: AuxType of the File **/
-        if(!my_stricmp(current_line->opcode_txt,"AUX"))
+      /** AUX : AuxType du fichier **/
+      if(!my_stricmp(current_line->opcode_txt,"AUX"))
         {
-            /* Decode the value */
-            current_omfproject->aux_type = GetWordValue(current_line->operand_txt);
-            continue;
+          /* Décode la valeur */
+          current_omfproject->aux_type = GetWordValue(current_line->operand_txt);
+          continue;
         }
         
-        /** XPL : Express Load **/
-        if(!my_stricmp(current_line->opcode_txt,"XPL"))
+      /** XPL : Express Load **/
+      if(!my_stricmp(current_line->opcode_txt,"XPL"))
         {
-            current_omfproject->express_load = 1;
-            continue;
+          current_omfproject->express_load = 1;
+          continue;
+        }
+      
+      /***************************/
+      /** DSK : Nouveau Fichier **/
+      /***************************/
+      if(!my_stricmp(current_line->opcode_txt,"DSK"))
+        {
+          /** Nouveau OMF File **/
+          current_omffile = mem_alloc_omffile(current_line->operand_txt);
+          if(current_omffile == NULL)
+            {
+              printf("     => Error, Impossible to allocate memory to process Link file.\n");
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+
+          /* Un fichier de plus */
+          current_omfproject->nb_file++;
+          if(current_omfproject->first_file == NULL)
+            current_omfproject->first_file = current_omffile;
+          else
+            current_omfproject->last_file->next = current_omffile;
+          current_omfproject->last_file = current_omffile;
+          
+          /* Ligne suivante */
+          continue;
         }
 
-        /** DSK: New Project / File **/
-        if(!my_stricmp(current_line->opcode_txt,"DSK"))
+      /** ORG : Adresse d'assemblage du fichier Fixed Address **/
+      if(!my_stricmp(current_line->opcode_txt,"ORG"))
         {
-            /*** ORG File + Table Name Table ***/
-            /* Allocation */
-            dsk_name_tab = (char **) calloc(current_omfproject->nb_file+1,sizeof(char *));
-            if(dsk_name_tab == NULL)
+          /* Un ORG s'inscrit dans un fichier */
+          if(current_omfproject->nb_file == 0)
             {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
-            org_address_tab = (DWORD *) calloc(current_omfproject->nb_file+1,sizeof(DWORD));
-            if(org_address_tab == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                free(dsk_name_tab);
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
-            file_size_tab = (DWORD *) calloc(current_omfproject->nb_file+1,sizeof(DWORD));
-            if(file_size_tab == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                free(dsk_name_tab);
-                free(org_address_tab);
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
-            /* Fill out structure */
-            for(int i=0; i<current_omfproject->nb_file; i++)
-            {
-                dsk_name_tab[i] = current_omfproject->dsk_name_tab[i];
-                org_address_tab[i] = current_omfproject->org_address_tab[i];
-            }
-            /* Replacement */
-            if(current_omfproject->dsk_name_tab != NULL)
-                free(current_omfproject->dsk_name_tab);
-            current_omfproject->dsk_name_tab = dsk_name_tab;
-            if(current_omfproject->org_address_tab != NULL)
-                free(current_omfproject->org_address_tab);
-            current_omfproject->org_address_tab = org_address_tab;
-            if(current_omfproject->file_size_tab != NULL)
-                free(current_omfproject->file_size_tab);
-            current_omfproject->file_size_tab = file_size_tab;
-
-            /* One more File */
-            current_omfproject->nb_file++;
-
-            /* New values */
-            current_omfproject->org_address_tab[current_omfproject->nb_file-1] = 0xFFFFFFFF;
-            current_omfproject->dsk_name_tab[current_omfproject->nb_file-1] = strdup(current_line->operand_txt);
-            if(current_omfproject->dsk_name_tab[current_omfproject->nb_file-1] == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
+              printf("     => Error, Invalid ORG directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
             }
 
-            /* Next line */
-            continue;
+          /* Décode la valeur + Vérifie la plage */
+          current_omfproject->last_file->org_address = GetDwordValue(current_line->operand_txt);
+          if(current_omfproject->last_file->org_address > 0xFFFFFF)
+            {
+              printf("     => Error, Invalid ORG value in Link file : %X.\n",(int)current_omfproject->last_file->org_address);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+
+          /* Ligne suivante */
+          continue;
         }
 
-        /** ORG: Assembly Address of the File Fixed Address **/
-        if(!my_stricmp(current_line->opcode_txt,"ORG") && current_omfproject->nb_file > 0)
+      /***************************/
+      /** ASM : Nouveau Segment **/
+      /***************************/
+      if(!my_stricmp(current_line->opcode_txt,"ASM"))
         {
-            /* Decode the value */
-            current_omfproject->org_address_tab[current_omfproject->nb_file-1] = GetDwordValue(current_line->operand_txt);
-
-            /* Verify the value */
-            if(current_omfproject->org_address_tab[current_omfproject->nb_file-1] > 0xFFFFFF)
+          /* Un ASM s'inscrit dans un fichier */
+          if(current_omfproject->nb_file == 0)
             {
-                printf("     => Error, Invalid ORG value : %X.\n",(int)current_omfproject->org_address_tab[current_omfproject->nb_file-1]);
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
-            continue;
-        }
-
-        /** ASM: New Segment **/
-        if(!my_stricmp(current_line->opcode_txt,"ASM"))
-        {
-            /* Segment memory allocation */
-            new_omfsegment = mem_alloc_omfsegment();
-            if(new_omfsegment == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
+              printf("     => Error, Invalid ASM directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
             }
 
-            /* Source file name */
-            BuildAbsolutePath(current_line->operand_txt,param->current_folder_path,file_path);
-            new_omfsegment->master_file_path = strdup(file_path);
-            if(new_omfsegment->master_file_path == NULL)
+          /* Allocation mémoire du Segment */
+          current_omfsegment = mem_alloc_omfsegment("");
+          if(current_omfsegment == NULL)
             {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
+              printf("     => Error, Impossible to allocate memory to process Link file.\n");
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
             }
 
-            /* File number */
-            new_omfsegment->file_number = current_omfproject->nb_file;
+          /* Attachement du Segment à la liste */
+          if(current_omfproject->last_file->first_segment == NULL)
+            current_omfproject->last_file->first_segment = current_omfsegment;
+          else
+            current_omfproject->last_file->last_segment->next = current_omfsegment;
+          current_omfproject->last_file->last_segment = current_omfsegment;
+          current_omfproject->last_file->nb_segment++;
 
-            /* Attachment of the Segment to the list */
-            if(current_omfproject->first_segment == NULL)
-                current_omfproject->first_segment = new_omfsegment;
-            else
-                current_omfproject->last_segment->next = new_omfsegment;
-            current_omfproject->last_segment = new_omfsegment;
-            current_omfproject->nb_segment++;
-
-            /* Next line */
-            continue;
-        }
-
-        /** DS: Number of 0 to add at the end of the segment **/
-        if(!my_stricmp(current_line->opcode_txt,"DS") && current_omfproject->last_segment != NULL)
-        {
-            current_omfproject->last_segment->ds_end = atoi(current_line->operand_txt);
-            continue;
-        }
-
-        /** KND: Type and Segment Attributes **/
-        if(!my_stricmp(current_line->opcode_txt,"KND") && current_omfproject->last_segment != NULL)
-        {
-            /* Decode the value */
-            current_omfproject->last_segment->type_attributes = GetWordValue(current_line->operand_txt);
-
-            /* Verify the type value */
-            if(!(((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0000) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0001) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0002) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0004) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0008) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0010) ||
-                 ((current_omfproject->last_segment->type_attributes & 0x00FF) == 0x0012)))
+          /* Chemin du fichier Source Master */
+          current_omfsegment->master_file_path = BuildProjectFilePath(current_line->operand_txt,"ASM");
+          if(current_omfsegment->master_file_path == NULL)
             {
-                printf("     => Error, Invalid Link file : Unknown Type value for Directive KND (%04X) at line %d.\n",current_omfproject->last_segment->type_attributes,current_line->file_line_number);
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
+              printf("     => Error, Impossible to allocate memory to process Link file.\n");
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
             }
 
-            /* Next value */
-            continue;
+          /* Numéro du fichier (1-N) */
+          current_omfsegment->file_number = current_omfproject->nb_file;
+
+          /* Ligne suivante */
+          continue;
         }
 
-        /** ALI : Alignement **/
-        if(!my_stricmp(current_line->opcode_txt,"ALI") && current_omfproject->last_segment != NULL)
+      /** DS : Nombre de 0 à ajouter à la fin du segment **/
+      if(!my_stricmp(current_line->opcode_txt,"DS"))
         {
-            if(!my_stricmp(current_line->operand_txt,"BANK"))
-                current_omfproject->last_segment->alignment = ALIGN_BANK;
-            else if(!my_stricmp(current_line->operand_txt,"PAGE"))
-                current_omfproject->last_segment->alignment = ALIGN_PAGE;
-            else if(!my_stricmp(current_line->operand_txt,"NONE"))
-                current_omfproject->last_segment->alignment = ALIGN_NONE;
-            else
+          /* Un DS s'inscrit dans un File/Segment */
+          if(current_omfproject->nb_file == 0)
             {
-                printf("     => Error, Invalid Link file : Unknown value for Directive ALI (%s) at line %d.\n",current_line->operand_txt,current_line->file_line_number);
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
+              printf("     => Error, Invalid DS directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          if(current_omfproject->last_file->last_segment == NULL)
+            {
+              printf("     => Error, Invalid DS directive (%s) in Link file. Missing previous SNA directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          current_omfsegment = current_omfproject->last_file->last_segment;
+
+          /* Décode la valeur */
+          current_omfproject->last_file->last_segment->ds_end = atoi(current_line->operand_txt);
+          continue;
+        }
+
+      /** KND : Type et Attributs du Segment **/
+      if(!my_stricmp(current_line->opcode_txt,"KND"))
+        {
+          /* Un KND s'inscrit dans un File/Segment */
+          if(current_omfproject->nb_file == 0)
+            {
+              printf("     => Error, Invalid KND directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          if(current_omfproject->last_file->last_segment == NULL)
+            {
+              printf("     => Error, Invalid KND directive (%s) in Link file. Missing previous SNA directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          current_omfsegment = current_omfproject->last_file->last_segment;
+
+          /* Décode la valeur */
+          current_omfsegment->type_attributes = GetWordValue(current_line->operand_txt);
+
+          /* Vérifie les valeurs : Type */
+          if(!(((current_omfsegment->type_attributes & 0x00FF) == 0x0000) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0001) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0002) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0004) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0008) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0010) ||
+               ((current_omfsegment->type_attributes & 0x00FF) == 0x0012)))
+            {
+              printf("     => Error, Invalid Link file : Unknown Type value for Directive KND (%04X) at line %d.\n",current_omfsegment->type_attributes,current_line->file_line_number);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
             }
 
-            /* Next line */
-            continue;
+          /* Valeur suivante */
+          continue;
         }
 
-        /** LNA : Load Name **/
-        if(!my_stricmp(current_line->opcode_txt,"LNA") && current_omfproject->last_segment != NULL)
+      /** ALI : Alignement **/
+      if(!my_stricmp(current_line->opcode_txt,"ALI"))
         {
-            if(current_omfproject->last_segment->load_name == NULL)
+          /* Un ALI s'inscrit dans un File/Segment */
+          if(current_omfproject->nb_file == 0)
             {
-                current_omfproject->last_segment->load_name = strdup(current_line->operand_txt);
-                if(current_omfproject->last_segment->load_name == NULL)
+              printf("     => Error, Invalid ALI directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          if(current_omfproject->last_file->last_segment == NULL)
+            {
+              printf("     => Error, Invalid ALI directive (%s) in Link file. Missing previous SNA directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          current_omfsegment = current_omfproject->last_file->last_segment;
+
+          /* Décode la valeur */
+          if(!my_stricmp(current_line->operand_txt,"BANK"))
+            current_omfsegment->alignment = ALIGN_BANK;
+          else if(!my_stricmp(current_line->operand_txt,"PAGE"))
+            current_omfsegment->alignment = ALIGN_PAGE;
+          else if(!my_stricmp(current_line->operand_txt,"NONE"))
+            current_omfsegment->alignment = ALIGN_NONE;
+          else
+            {
+              printf("     => Error, Invalid Link file : Unknown value for Directive ALI (%s) at line %d.\n",current_line->operand_txt,current_line->file_line_number);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+
+          /* Ligne suivante */
+          continue;
+        }
+
+      /** LNA : Load Name **/
+      if(!my_stricmp(current_line->opcode_txt,"LNA"))
+        {
+          /* Un LNA s'inscrit dans un File/Segment */
+          if(current_omfproject->nb_file == 0)
+            {
+              printf("     => Error, Invalid LNA directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          if(current_omfproject->last_file->last_segment == NULL)
+            {
+              printf("     => Error, Invalid LNA directive (%s) in Link file. Missing previous SNA directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          current_omfsegment = current_omfproject->last_file->last_segment;
+
+          /* Décode la valeur */
+          if(strlen(current_omfsegment->load_name) > 0)
+            {
+              /* On a déjà un LNA */
+              if(!my_stricmp(current_omfsegment->load_name,current_line->operand_txt))
+                continue;   /* Même valeur, on ne dit rien */
+              else
                 {
-                    printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
-                }
-
-                /* Remove " or ' */
-                CleanUpName(current_omfproject->last_segment->load_name);
-            }
-            else
-            {
-                /* We already have a LNA */
-                if(!my_stricmp(current_omfproject->last_segment->load_name,current_line->operand_txt))
-                    continue;   /* Same value, nothing is said */
-                else
-                {
-                    printf("     => Error, Invalid Link file : Two LNA directives found for Segment '%s'.\n",current_omfproject->last_segment->master_file_path);
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
-                }
-            }
-
-            /* Next line */
-            continue;
-        }
-
-        /** SNA : Segment Name **/
-        if(!my_stricmp(current_line->opcode_txt,"SNA") && current_omfproject->last_segment != NULL)
-        {
-            if(current_omfproject->last_segment->segment_name == NULL)
-            {
-                current_omfproject->last_segment->segment_name = strdup(current_line->operand_txt);
-                if(current_omfproject->last_segment->segment_name == NULL)
-                {
-                    printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
-                }
-
-                /* Remove " or ' */
-                CleanUpName(current_omfproject->last_segment->segment_name);
-            }
-            else
-            {
-                /* We already have a SNA */
-                if(!my_stricmp(current_omfproject->last_segment->segment_name,current_line->operand_txt))
-                    continue;   /* Same value, nothing is said */
-                else
-                {
-                    printf("     => Error, Invalid Link file : Two SNA directives found for Segment '%s'.\n",current_omfproject->last_segment->master_file_path);
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
+                  printf("     => Error, Invalid Link file : Two LNA directives found for Segment '%s'.\n",current_omfsegment->master_file_path);
+                  mem_free_omfproject(current_omfproject);
+                  return(NULL);
                 }
             }
+          else
+            {
+              /* Nouvelle valeur */
+              free(current_omfsegment->load_name);
+              current_omfsegment->load_name = strdup(current_line->operand_txt);
+              if(current_omfsegment->load_name == NULL)
+                {
+                  printf("     => Error, Impossible to allocate memory to process Link file.\n");
+                  mem_free_omfproject(current_omfproject);
+                  return(NULL);
+                }
 
-            /* Next line */
-            continue;
+              /* Enlève les " ou ' */
+              CleanUpName(current_omfsegment->load_name);
+            }
+
+          /* Ligne suivante */
+          continue;
         }
 
-        /** The command is recognized, but we do not have a Segment as support **/
-        if(current_omfproject->last_segment == NULL &&
-           (!my_stricmp(current_line->opcode_txt,"DS") || !my_stricmp(current_line->opcode_txt,"KND") || !my_stricmp(current_line->opcode_txt,"ALI") ||
-            !my_stricmp(current_line->opcode_txt,"LNA") || !my_stricmp(current_line->opcode_txt,"SNA")))
+      /** SNA : Segment Name **/
+      if(!my_stricmp(current_line->opcode_txt,"SNA"))
         {
-            printf("     => Error, The directive %s is valid but a previous directive ASM is missing in the Link file.\n",current_line->opcode_txt);
-            mem_free_omfproject(current_omfproject);
-            return(NULL);
+          /* Un SNA s'inscrit dans un File/Segment */
+          if(current_omfproject->nb_file == 0)
+            {
+              printf("     => Error, Invalid SNA directive (%s) in Link file. Missing previous DSK directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          if(current_omfproject->last_file->last_segment == NULL)
+            {
+              printf("     => Error, Invalid SNA directive (%s) in Link file. Missing previous SNA directive.\n",current_line->operand_txt);
+              mem_free_omfproject(current_omfproject);
+              return(NULL);
+            }
+          current_omfsegment = current_omfproject->last_file->last_segment;
+
+          /* Décode la valeur */
+          if(strlen(current_omfsegment->segment_name) > 0)
+            {
+              /* On a déjà un SNA */
+              if(!my_stricmp(current_omfsegment->segment_name,current_line->operand_txt))
+                continue;   /* Même valeur, on ne dit rien */
+              else
+                {
+                  printf("     => Error, Invalid Link file : Two SNA directives found for Segment '%s'.\n",current_omfsegment->master_file_path);
+                  mem_free_omfproject(current_omfproject);
+                  return(NULL);
+                }
+            }
+          else
+            {
+              /* Nouvelle Valeur */
+              free(current_omfsegment->segment_name);
+              current_omfsegment->segment_name = strdup(current_line->operand_txt);
+              if(current_omfsegment->segment_name == NULL)
+                {
+                  printf("     => Error, Impossible to allocate memory to process Link file.\n");
+                  mem_free_omfproject(current_omfproject);
+                  return(NULL);
+                }
+
+              /* Enlève les " ou ' */
+              CleanUpName(current_omfsegment->segment_name);
+            }
+
+          /* Ligne suivante */
+          continue;
         }
 
-        /** Unknown directive or order **/
-        printf("     => Error, Invalid Link file : Unknown (or misordered) directive found (%s) at line %d.\n",current_line->opcode_txt,current_line->file_line_number);
-        mem_free_omfproject(current_omfproject);
-        return(NULL);
+      /** Commande inconnue **/
+      printf("     => Error, Invalid Link file : Unknown directive found (%s) at line %d.\n",current_line->opcode_txt,current_line->file_line_number);
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
     }
 
-    /** We validate the values of Header, Projects / Files and Segments **/
-    /*Have a non-OMF Multi-Segment */
-    if(current_omfproject->type == 0x0006)     /* BIN = Fixed Address : MultiBinary or SingleBinary */
+  /*******************************************************/
+  /** On valide les valeurs du Project / File / Segment **/
+  /*******************************************************/
+  /** [DSK] : File **/
+  if(current_omfproject->nb_file == 0)
     {
-        if(current_omfproject->dsk_name_tab != NULL)
-        {
-            /** Single Binary : All Segments will be pasted behind each other, in 1 or more Files **/
-            current_omfproject->is_omf = 0;
-            current_omfproject->is_multi_fixed = 1;
-            current_omfproject->is_single_binary = 1;
-            current_omfproject->express_load = 0;
-
-            /* Check the names */
-            for(int i=0; i<current_omfproject->nb_file; i++)
-            {
-                if(IsProdosName(current_omfproject->dsk_name_tab[i]) == 0)
-                {
-                    printf("     => Error, Bad Link file name '%s' : Invalid Prodos file name (15 chars max, letters/numbers/. allowed).\n",current_omfproject->dsk_name_tab[i]);
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
-                }
-            }
-            
-            /* Verify the Org Address */
-            for(int i=0; i<current_omfproject->nb_file; i++)
-            {
-                if(current_omfproject->org_address_tab[i] == 0xFFFFFFFF)
-                {
-                    printf("     => Error, Invalid Link file : Directive ORG is missing for File #%d.\n",i+1);
-                    mem_free_omfproject(current_omfproject);
-                    return(NULL);
-                }
-            }
-        }
-        else if(current_omfproject->dsk_name_tab == NULL)           /* No DSK or ORG in the Header */
-        {
-            /** Multi Binary: We will generate as many File Binary as there are Segments **/
-            current_omfproject->is_omf = 0;
-            current_omfproject->is_multi_fixed = 1;
-            current_omfproject->is_single_binary = 0;
-            current_omfproject->express_load = 0;
-        }
-    }
-    else
-    {
-        /** OMF : We will generate a Relogeable Program OMF v2.1 **/
-        current_omfproject->is_omf = 1;
-        current_omfproject->is_multi_fixed = 0;
-        current_omfproject->is_single_binary = 0;
-
-        /** We eliminate doubtful cases **/
-        if(current_omfproject->nb_file > 1)
-        {
-            printf("     => Error, Invalid Link file : Too many DSK directives (only one for an OMF File).\n");
-            mem_free_omfproject(current_omfproject);
-            return(NULL);
-        }
-        if(current_omfproject->dsk_name_tab == NULL)
-        {
-            printf("     => Error, Invalid Link file : Directive DSK is missing (Target OMF File name).\n");
-            mem_free_omfproject(current_omfproject);
-            return(NULL);
-        }
-        if(current_omfproject->org_address_tab[0] != 0xFFFFFFFF)
-        {
-            printf("     => Error, Invalid Link file : Directive ORG is not allowed (Target is a Relocatable OMF File).\n");
-            mem_free_omfproject(current_omfproject);
-            return(NULL);
-        }
-        
-        /* Verify the file name */
-        if(IsProdosName(current_omfproject->dsk_name_tab[0]) == 0)
-        {
-            printf("     => Error, Bad Link file name '%s' : Invalid Prodos file name (15 chars max, letters/numbers/. allowed).\n",current_omfproject->dsk_name_tab[0]);
-            mem_free_omfproject(current_omfproject);
-            return(NULL);
-        }
+      printf("     => Error, Invalid Link file : No File defined (use DSK directive).\n");
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
     }
 
-    /** Segments **/
-    if(current_omfproject->nb_segment == 0)
-    {
+  /** [ASM] : Segment **/
+  for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+    if(current_omffile->nb_segment == 0)
+      {
         printf("     => Error, Invalid Link file : No Segment defined (use ASM directive).\n");
         mem_free_omfproject(current_omfproject);
         return(NULL);
-    }
+      }
 
-    /** Check all Segments: we put an empty string for missing parameters **/
-    for(current_omfsegment = current_omfproject->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+  /** [TYP] : Type **/
+  if(current_omfproject->has_type == 0)
     {
-        /* Load Name */
-        if(current_omfsegment->load_name == NULL)
+      printf("     => Error, Invalid Link file : No Type defined (use TYP directive).\n");
+      mem_free_omfproject(current_omfproject);
+      return(NULL);
+    }
+
+  /** [SNA] : On veut des noms de Segment **/
+  for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+    for(current_omfsegment = current_omffile->first_segment; current_omfsegment; current_omfsegment = current_omfsegment->next)
+      if(strlen(current_omfsegment->segment_name) == 0)
         {
-            current_omfsegment->load_name = strdup("");
-            if(current_omfsegment->load_name == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
+          printf("     => Error, Invalid Link file : Missing Segment Name for '%s' (use SNA directive).\n",current_omfsegment->master_file_path);
+          mem_free_omfproject(current_omfproject);
+          return(NULL);
         }
 
-        /* Segment Name */
-        if(current_omfsegment->segment_name == NULL)
+  /** Fichier OMF / Mono ou Multi-Segment / Single File **/
+  if(current_omfproject->type >= 0xB2 && current_omfproject->type <= 0xBD)
+    {
+      /* Les Fichiers OMF sont mono-file */
+      if(current_omfproject->nb_file != 1)
         {
-            current_omfsegment->segment_name = strdup("");
-            if(current_omfsegment->segment_name == NULL)
-            {
-                printf("     => Error, Impossible to allocate memory to process Link file.\n");
-                mem_free_omfproject(current_omfproject);
-                return(NULL);
-            }
+          printf("     => Error, Invalid Link file : OMF File can't be multi-files (too many DSK directive).\n");
+          mem_free_omfproject(current_omfproject);
+          return(NULL);
+        }
+
+      /* Pas de ORG pour les OMF */
+      if(current_omfproject->first_file->org_address != 0xFFFFFFFF)
+        {
+          printf("     => Error, Invalid Link file : Directive ORG is not allowed (Target is a Relocatable OMF File).\n");
+          mem_free_omfproject(current_omfproject);
+          return(NULL);
+        }
+
+      /* Project Type : OMF Mono / Multi Segment */
+      if(current_omfproject->first_file->nb_segment == 1)
+        current_omfproject->project_type = PROJECT_TYPE_MONO_SEG_RELOC_ADDR;
+      else
+        current_omfproject->project_type = PROJECT_TYPE_MULTI_SEG_RELOC_ADDR;
+
+      /** On va générer un Program Relogeable OMF v2.1 **/
+      current_omfproject->address_type      = ADDRESS_TYPE_RELATIVE_OMF;
+      current_omfproject->merge_fa_segments = 0;
+    }
+  /** Fichier Adresse Fixe **/
+  else
+    {
+      /* Pas de XPL pour les Fixed Address */
+      if(current_omfproject->express_load == 1)
+        {
+          printf("     => Error, Invalid Link file : Directive XPL is not allowed (Target is a Fixed Address File).\n");
+          mem_free_omfproject(current_omfproject);
+          return(NULL);
+        }
+
+      /** [ORG] : On veut des Org Adresses **/
+      for(current_omffile = current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+        if(current_omffile->org_address == 0xFFFFFFFF)
+          {
+            printf("     => Error, Invalid Link file : Directive ORG is missing for File %s.\n",current_omffile->dsk_name);
+            mem_free_omfproject(current_omfproject);
+            return(NULL);
+          }
+
+      /** Mono / Multi Files Fixed Address **/
+      if(current_omfproject->nb_file == 1)
+        {
+          /* Project Type */
+          current_omfproject->project_type = PROJECT_TYPE_MONO_FILE_FIXED_ADDR;
+
+          /** Fixed Address / Single Binary : Tous les Segments seront collés les uns derrière les autres, dans 1 fichier **/
+          current_omfproject->address_type      = ADDRESS_TYPE_FIXED;
+          current_omfproject->merge_fa_segments = 1;
+          current_omfproject->express_load      = 0;
+        }
+      else
+        {
+          /* Project Type */
+          current_omfproject->project_type = PROJECT_TYPE_MULTI_FILE_FIXED_ADDR;
+
+          /** Fixed Address / Multi Binary : On va générer autant de fichier Binary qu'il y a de File **/
+          current_omfproject->address_type      = ADDRESS_TYPE_FIXED;
+          current_omfproject->merge_fa_segments = 0;
+          current_omfproject->express_load      = 0;
         }
     }
 
-    /* OK */
-    return(current_omfproject);
+  /* OK */
+  return(current_omfproject);
+}
+
+
+/******************************************************************************************************/
+/*  GetSourceFileDirective() :  Récupère les directives TYP/DSK/ORG dans les fichiers Source. */
+/******************************************************************************************************/
+static void GetSourceFileDirective(char *source_file_path, char *buffer_typ_rtn, char *buffer_dsk_rtn, char *buffer_org_rtn, int init)
+{
+  char file_name[1024];
+  char put_file_path[1024];
+  char *full_file_path;
+  struct source_file *current_file;
+  struct source_line *current_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /* Init */
+  if(init == 1)
+    {
+      strcpy(buffer_typ_rtn,"");
+      strcpy(buffer_dsk_rtn,"");
+      strcpy(buffer_org_rtn,"");
+    }
+
+  /* Extrait le Nom du fichier du chemin */
+  GetNameFromPath(source_file_path,file_name);
+
+  /** Charge en mémoire le fichier principal Source **/
+  current_file = LoadOneSourceFile(source_file_path,file_name,0);
+  if(current_file == NULL)
+    return;
+
+  /** On passe toutes les lignes en revue **/
+  for(current_line = current_file->first_line; current_line; current_line = current_line->next)
+    {
+      /* Commentaire / Vide */
+      if(current_line->type == LINE_COMMENT || current_line->type == LINE_EMPTY)
+        continue;
+
+      /* Opcode TYP */
+      if(!my_stricmp(current_line->opcode_txt,"TYP") && strlen(buffer_typ_rtn) == 0)
+        {
+          /* Récupère la valeur */
+          strcpy(buffer_typ_rtn,current_line->operand_txt);
+
+          /* Décode les Alias Ascii (S16 pour $B3) */
+          DecodeDirectiveTYP(buffer_typ_rtn);
+        }
+      /* Opcode DSK */
+      if(!my_stricmp(current_line->opcode_txt,"DSK") && strlen(buffer_dsk_rtn) == 0)
+        strcpy(buffer_dsk_rtn,current_line->operand_txt);
+      /* Opcode ORG */
+      if(!my_stricmp(current_line->opcode_txt,"ORG") && strlen(buffer_org_rtn) == 0)
+        strcpy(buffer_org_rtn,current_line->operand_txt);
+
+      /** On recherche dans les sous fichiers sources (uniquement depuis le Master Source File) **/
+      if(!my_stricmp(current_line->opcode_txt,"PUT") && init == 1)
+        {
+          /* Chemin du fichier */
+          full_file_path = BuildProjectFilePath(current_line->operand_txt,"PUT");
+          if(full_file_path != NULL)
+            {
+              /* Chemin complet */
+              strcpy(put_file_path,full_file_path);
+              free(full_file_path);
+
+              /* Recherche dans ce fichier source (récursivité) */
+              GetSourceFileDirective(put_file_path,buffer_typ_rtn,buffer_dsk_rtn,buffer_org_rtn,0);
+            }
+          else
+            printf("  => Error : Can't build file path for '%s'\n",current_line->operand_txt);
+        }
+    }
+
+  /* Libération mémoire */
+  mem_free_sourcefile(current_file,0);
 }
 
 /***********************************************************************/
