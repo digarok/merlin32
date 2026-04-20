@@ -1,977 +1,966 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_File.c : Module for the management of the Files.            */
+/*  a65816_File.c : Module pour la gestion des fichiers.               */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
-#include "Dc_Library.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
 
+#include "Dc_Library.h"
+#include "a65816_Line.h"
+#include "a65816_Macro.h"
+#include "a65816_OMF.h"
 #include "a65816_File.h"
 
-#include "a65816_OMF.h"
+static int DumpSegmentSymbol(FILE *,struct omf_segment *,struct omf_project *);
 
 
-/********************************************************/
-/*  LoadAllSourceFile() :  Loading of all Source Files. */
-/********************************************************/
-int LoadAllSourceFile(char *first_file_path, char *macro_folder_path, struct omf_segment *current_omfsegment)
+/*******************************************************************/
+/*  LoadAllSourceFile() :  Chargement de tous les fichiers Source. */
+/*******************************************************************/
+int LoadAllSourceFile(char *first_file_path, struct omf_segment *current_omfsegment)
 {
-    int i, file_number, line_number, nb_error;
-    struct source_file *first_file;
-    struct source_file *last_file;
-    struct source_file *new_file;
-    struct source_line *current_line;
-    struct source_line *next_line;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+  int i, file_number, line_number, nb_error;
+  char *file_path;
+  struct source_file *first_file;
+  struct source_file *last_file;
+  struct source_file *new_file;
+  struct source_line *current_line;
+  struct source_line *next_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Init */
-    file_number = 1;
-    nb_error = 0;
+  /* Init */
+  file_number = 1;
+  nb_error = 0;
 
-    /* Extract the File name */
-    for(i=(int)strlen(first_file_path); i>=0; i--)
-        if(first_file_path[i] == '/' || first_file_path[i] == '\\')
-            break;
-    strcpy(param->buffer_file_name,&first_file_path[i+1]);
+  /* Extrait le nom du fichier */
+  for(i=(int)strlen(first_file_path); i>=0; i--)
+    if(first_file_path[i] == '/' || first_file_path[i] == '\\')
+      break;
+  strcpy(param->buffer_file_name,&first_file_path[i+1]);
 
-    /** Loading the first Source file **/
-    printf("        - %s\n",param->buffer_file_name);
-    first_file = LoadOneSourceFile(first_file_path,param->buffer_file_name,file_number);
-    if(first_file == NULL)
+  /** Chargement du premier fichier Source **/
+  printf("        - %s\n",param->buffer_file_name);
+  first_file = LoadOneSourceFile(first_file_path,param->buffer_file_name,file_number);
+  if(first_file == NULL)
     {
-        sprintf(param->buffer_error,"Impossible to load Source file '%s'",first_file_path);
-        my_RaiseError(ERROR_RAISE,param->buffer_error);
+      sprintf(param->buffer_error,"Impossible to load Source file '%s'",first_file_path);
+      my_RaiseError(ERROR_RAISE,param->buffer_error);
     }
-    last_file = first_file;
+  last_file = first_file;
 
-    /* Stores the first Source file */
-    my_Memory(MEMORY_SET_FILE,first_file,NULL,current_omfsegment);
+  /* Stocke le premier fichier Source de ce Segment */
+  my_Memory(MEMORY_SET_SOURCE_FILE,first_file,NULL,current_omfsegment);
 
-    /** Loading of all Files Source: We only look in the 1st File **/
-    for(current_line = first_file->first_line; current_line; )
+  /** Chargement de tous les fichiers Source : On ne regarde que dans le 1er fichier **/
+  for(current_line = first_file->first_line; current_line; )
     {
-        if((!my_stricmp(current_line->opcode_txt,"PUT") || !my_stricmp(current_line->opcode_txt,"PUTBIN") || !my_stricmp(current_line->opcode_txt,"USE")) && strlen(current_line->operand_txt) > 0)
+      if((!my_stricmp(current_line->opcode_txt,"PUT") || !my_stricmp(current_line->opcode_txt,"PUTBIN") || !my_stricmp(current_line->opcode_txt,"USE")) && strlen(current_line->operand_txt) > 0)
         {
-            /* If the inclusion is done by a Use on check if we are dealing with a File of Macro */
-            if(!my_stricmp(current_line->opcode_txt,"USE") && IsMacroFile(current_line->operand_txt,param->source_folder_path,macro_folder_path))
+          /* Si l'inclusion se fait par un Use on vérifie si on a affaire à un fichier de Macro */
+          if(!my_stricmp(current_line->opcode_txt,"USE") && IsMacroFile(current_line->operand_txt))
             {
-                current_line = current_line->next;
-                continue;
+              current_line = current_line->next;
+              continue;
             }
 
-            /* New File */
-            file_number++;
+          /* Nouveau fichier */
+          file_number++;
 
-            /* We insert the new File here */
-            next_line = current_line->next;
+          /* On insère le nouveau fichier ici */
+          next_line = current_line->next;
 
-            /** Source file or Macro **/
-            if(!my_stricmp(current_line->opcode_txt,"PUT") || !my_stricmp(current_line->opcode_txt,"USE"))
+          /** Fichier Source ou Macro **/
+          if(!my_stricmp(current_line->opcode_txt,"PUT") || !my_stricmp(current_line->opcode_txt,"USE"))
             {
-                /* Built the File name */
-                strcpy(param->buffer_file_name,current_line->operand_txt);
+              /* Construit le nom du fichier */
+              strcpy(param->buffer_file_name,current_line->operand_txt);
 
-                /* Build the full path of the File */
-                sprintf(param->buffer_file_path,"%s%s",param->source_folder_path,param->buffer_file_name);
-
-                /* Should you add a .s? */
-                if(my_IsFileExist(param->buffer_file_path) == 0)
+              /* Construit le chemin du fichier */
+              file_path = BuildProjectFilePath(current_line->operand_txt,current_line->opcode_txt);
+              if(file_path != NULL)
                 {
-                    /* The File Does not exist */
-                    if(strlen(param->buffer_file_name) > 2)
-                        if(my_stricmp(&param->buffer_file_name[strlen(param->buffer_file_name)-2],".s"))
-                        {
-                            /* Add the .s to the name and to the full path */
-                            strcat(param->buffer_file_name,".s");
-                            strcat(param->buffer_file_path,".s");
-                        }
+                  strcpy(param->buffer_file_path,file_path);
+                  free(file_path);
                 }
+              else
+                strcpy(param->buffer_file_path,current_line->operand_txt);
 
-                /* Load the Text File */
-                printf("        - %s\n",param->buffer_file_name);
-                new_file = LoadOneSourceFile(param->buffer_file_path,param->buffer_file_name,file_number);
-                if(new_file == NULL)
+              /* Charge le fichier Texte */
+              printf("        - %s\n",param->buffer_file_name);
+              new_file = LoadOneSourceFile(param->buffer_file_path,param->buffer_file_name,file_number);
+              if(new_file == NULL)
                 {
-                    sprintf(param->buffer_error,"Impossible to open Source file '%s'",param->buffer_file_path);
-                    my_RaiseError(ERROR_RAISE,param->buffer_error);
+                  sprintf(param->buffer_error,"Impossible to open Source file '%s'",param->buffer_file_path);
+                  my_RaiseError(ERROR_RAISE,param->buffer_error);
                 }
             }
-            else   /* PUTBIN: Binary File */
+          else   /* PUTBIN : Fichier Binaire */
             {
-                /* Construct the name */
-                strcpy(param->buffer_file_name,current_line->operand_txt);
+              /* Construit le nom du fichier */
+              strcpy(param->buffer_file_name,current_line->operand_txt);
 
-                /* Built the path */
-                sprintf(param->buffer_file_path,"%s%s",param->source_folder_path,param->buffer_file_name);
-
-                /* Load the Binary File */
-                printf("        - %s\n",param->buffer_file_name);
-                new_file = LoadOneBinaryFile(param->buffer_file_path,param->buffer_file_name,file_number);
-                if(new_file == NULL)
+              /* Construit le chemin du fichier */
+              file_path = BuildProjectFilePath(current_line->operand_txt,current_line->opcode_txt);
+              if(file_path != NULL)
                 {
-                    sprintf(param->buffer_error,"Impossible to open Binary file '%s'",param->buffer_file_path);
-                    my_RaiseError(ERROR_RAISE,param->buffer_error);
+                  strcpy(param->buffer_file_path,file_path);
+                  free(file_path);
+                }
+              else
+                strcpy(param->buffer_file_path,current_line->operand_txt);
+
+              /* Charge le fichier Binaire */
+              printf("        - %s\n",param->buffer_file_name);
+              new_file = LoadOneBinaryFile(param->buffer_file_path,param->buffer_file_name,file_number);
+              if(new_file == NULL)
+                {
+                  sprintf(param->buffer_error,"Impossible to open Binary file '%s'",param->buffer_file_path);
+                  my_RaiseError(ERROR_RAISE,param->buffer_error);
                 }
             }
 
-            /* File attachment to the previous ones */
-            if(new_file != NULL)
+          /* Attache ce fichier aux précédents */
+          if(new_file != NULL)
             {
-                last_file->next = new_file;
-                last_file = new_file;
+              last_file->next = new_file;
+              last_file = new_file;
             }
 
-            /* Insert the Lines of this File to the previous Lines */
-            if(new_file != NULL)
+          /* Insère les lignes de ce fichier aux lignes précédantes */
+          if(new_file != NULL)
             {
-                new_file->last_line->next = current_line->next;
-                current_line->next = new_file->first_line;
+              new_file->last_line->next = current_line->next;
+              current_line->next = new_file->first_line;
             }
 
-            /* Next line */
-            current_line = next_line;
+          /* Ligne suivante */
+          current_line = next_line;
         }
-        else
-            current_line = current_line->next;
+      else
+        current_line = current_line->next;
     }
 
-    /** Global numbering of Lines **/
-    for(line_number=1,current_line = first_file->first_line; current_line; current_line = current_line->next,line_number++)
-        current_line->line_number = line_number;
+  /** Numérotation globale des lignes **/
+  for(line_number=1,current_line = first_file->first_line; current_line; current_line = current_line->next,line_number++)
+    current_line->line_number = line_number;
 
-    /* OK */
-    return(nb_error);
+  /* OK */
+  return(nb_error);
 }
 
 
-/**************************************************/
-/*  LoadOneSourceFile() :  Loading a Source file. */
-/**************************************************/
+/***********************************************************/
+/*  LoadOneSourceFile() :  Chargement d'un fichier Source. */
+/***********************************************************/
 struct source_file *LoadOneSourceFile(char *file_path, char *file_name, int file_number)
 {
-    struct source_file *current_file = NULL;
-    struct source_line *current_line = NULL;
-    int nb_line = 1;
-    size_t file_size = 0;
-    unsigned char *file_data = NULL;
-    char *begin_line = NULL;
-    char *end_line = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+  struct source_file *current_file;
+  struct source_line *current_line;
+  int i, file_size, nb_line;
+  unsigned char *file_data;
+  char *begin_line;
+  char *end_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Loading the File */
-    file_data = LoadTextFileData(file_path,&file_size);
-    if(file_data == NULL)
-        return(NULL);
+  /* Chargement du fichier */
+  file_data = LoadTextFileData(file_path,&file_size);
+  if(file_data == NULL)
+    return(NULL);
 
-    /* Allocate memory */
-    current_file = (struct source_file *) calloc(1,sizeof(struct source_file));
-    if(current_file == NULL)
+  /* Allocation mémoire */
+  current_file = (struct source_file *) calloc(1,sizeof(struct source_file));
+  if(current_file == NULL)
     {
-        free(file_data);
-        return(NULL);
+      free(file_data);
+      return(NULL);
     }
 
-    /* Data */
-    current_file->data = file_data;
+  /* Data */
+  current_file->data = file_data;
 
-    /* File Path */
-    current_file->file_path = strdup(file_path);
+  /* File Path */
+  current_file->file_path = strdup(file_path);
 
-    /* Build file name */
-    current_file->file_name = strdup(file_name);
+  /* Build file name */
+  current_file->file_name = strdup(file_name);
     
-    /* File number */
-    current_file->file_number = file_number;
+  /* File number */
+  current_file->file_number = file_number;
 
-    /* Count the number of rows */
-    for(int i = 0; i < (int)file_size; i++)
+  /* Compte le nombre de lignes */
+  for(i=0,nb_line=1; i<file_size; i++)
+    if(current_file->data[i] == '\n')
+      nb_line++;
+
+  /* Allocation mémoire du tableau de ligne */
+  current_file->tab_line = (char **) calloc(nb_line,sizeof(char *));
+
+  /* Vérification des allocations mémoires */
+  if(current_file->file_path == NULL || current_file->file_name == NULL || current_file->tab_line == NULL)
     {
-        if(current_file->data[i] == 0x0A)
-            nb_line++;
+      mem_free_sourcefile(current_file,0);
+      return(NULL);
     }
 
-    /* Allocate memory for table of ligne */
-    current_file->tab_line = (char **) calloc(nb_line,sizeof(char *));
-
-    /* Verification of memory allocations */
-    if(current_file->file_path == NULL || current_file->file_name == NULL || current_file->tab_line == NULL)
+  /** Détermine le début de chaque ligne **/
+  begin_line = (char *) current_file->data;
+  for(i=0; begin_line; i++)
     {
-        mem_free_sourcefile(current_file,0);
-        return(NULL);
+      /* Conserve un pointeur sur le début de ligne */
+      current_file->tab_line[i] = begin_line;
+
+      /* Fin de ligne */
+      end_line = strchr(begin_line,'\n');
+      if(end_line != NULL)
+        *end_line = '\0';
+
+      /* Ligne suivante */
+      begin_line = (end_line == NULL) ? NULL : end_line+1;
+    }
+  current_file->nb_line = i;
+
+  /** Création des lignes **/
+  for(i=0; i<current_file->nb_line; i++)
+    {
+      /* Décodage de la ligne */
+      current_line = BuildSourceLine(current_file,i);
+      if(current_line == NULL)
+        {
+          mem_free_sourcefile(current_file,0);
+          sprintf(param->buffer_error,"Impossible to build source line %d",i);
+          my_RaiseError(ERROR_RAISE,param->buffer_error);
+        }
+
+      /* Si on tomber sur un END, on s'arrête là */
+      if(!my_stricmp(current_line->opcode_txt,"END"))
+        {
+          current_file->nb_line = i+1;
+          break;
+        }
+
+      /* On va repérer les lignes utilisant déjà un label ozunid_ */
+      if(!my_strnicmp(current_line->label_txt,"ozunid_",strlen("ozunid_")))
+        ProcessOZUNIDLine(current_line->label_txt);
+
+      /* Attachement à la liste */
+      if(current_file->first_line == NULL)
+        current_file->first_line = current_line;
+      else
+        current_file->last_line->next = current_line;
+      current_file->last_line = current_line;
     }
 
-    /** Determine the beginning of each line **/
-    begin_line = (char *) current_file->data;
-    int line = 0;
-    for(; begin_line; line++)
-    {
-        /* Keep a pointer to the beginning of line */
-        current_file->tab_line[line] = begin_line;
-
-        /* End of line */
-        end_line = strchr(begin_line,0x0A);
-        if(end_line != NULL)
-        {
-            begin_line = end_line+1;
-            if( *(end_line-1) == 0x0D )
-                --end_line;
-            *end_line = '\0';
-        }
-        else
-        {
-            begin_line = NULL;
-        }
-    }
-    current_file->nb_line = line;
-
-    /** Create the lines **/
-    for(int i = 0; i<current_file->nb_line; i++)
-    {
-        /* Decoding of the line */
-        current_line = BuildSourceLine(current_file,i);
-        if(current_line == NULL)
-        {
-            mem_free_sourcefile(current_file,0);
-            sprintf(param->buffer_error,"Impossible to build source line %d",i);
-            my_RaiseError(ERROR_RAISE,param->buffer_error);
-        }
-
-        /* If we come across an END, stop */
-        if(!my_stricmp(current_line->opcode_txt,"END"))
-        {
-            current_file->nb_line = i+1;
-            break;
-        }
-
-        /* We'll find the Lines already using an ozunid_ label */
-        if(!my_strnicmp(current_line->label_txt,"ozunid_",strlen("ozunid_")))
-            ProcessOZUNIDLine(current_line->label_txt);
-
-        /* Attachment to the list */
-        if(current_file->first_line == NULL)
-            current_file->first_line = current_line;
-        else
-            current_file->last_line->next = current_line;
-        current_file->last_line = current_line;
-    }
-
-    /* Return the structure */
-    return(current_file);
+  /* Renvoi la structure */
+  return(current_file);
 }
 
 
-/**************************************************/
-/*  LoadOneBinaryFile() :  Loading a Source file. */
-/**************************************************/
+/***********************************************************/
+/*  LoadOneBinaryFile() :  Chargement d'un fichier Source. */
+/***********************************************************/
 struct source_file *LoadOneBinaryFile(char *file_path, char *file_name, int file_number)
 {
-    struct source_file *current_file = NULL;
-    struct source_line *current_line = NULL;
-    int offset = 0, nb_line = 0;
-    size_t file_bin_size = 0, file_size = 0;
-    char *file_data = NULL;
-    unsigned char *file_bin_data = NULL;
-    char *begin_line = NULL;
-    char *end_line = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+  struct source_file *current_file;
+  struct source_line *current_line;
+  int i, offset, file_bin_size, file_size, nb_line;
+  char *file_data;
+  unsigned char *file_bin_data;
+  char *begin_line;
+  char *end_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Loading the binary File */
-    file_bin_data = LoadBinaryFileData(file_path,&file_bin_size);
-    if(file_bin_data == NULL)
-        return(NULL);
+  /* Chargement du fichier Bin */
+  file_bin_data = LoadBinaryFileData(file_path,&file_bin_size);
+  if(file_bin_data == NULL)
+    return(NULL);
 
-    /** Text conversion with HEX byte, byte... **/
-    nb_line = (int)file_bin_size / 16;
-    if(nb_line*16 != (int)file_bin_size)
-        nb_line++;                      /* The Last line will not have 16 bytes of Data */
-    file_size = nb_line*((int)strlen(" HEX  \n")) + file_bin_size*3 + 1;    /* 0A, */
+  /** Converion en buffer Texte avec des HEX byte,byte... **/
+  nb_line = file_bin_size / 16;
+  if(nb_line*16 != file_bin_size)
+    nb_line++;                      /* La dernière ligne n'aura pas 16 bytes de Data */
+  file_size = nb_line*((int)strlen(" HEX  \n")) + file_bin_size*3 + 1;    /* 0A, */
 
-    /* Allocate memory */
-    file_data = (char *) calloc(file_size,sizeof(char));
-    if(file_data == NULL)
+  /* Allocation mémoire */
+  file_data = (char *) calloc(file_size,sizeof(char));
+  if(file_data == NULL)
     {
-        free(file_bin_data);
-        return(NULL);
+      free(file_bin_data);
+      return(NULL);
     }
 
-    /* Construction of buffer Text */
-    for(int i = 0; i < (int)file_bin_size; i++)
+  /* Construction du buffer Texte */
+  for(i=0,offset=0; i<file_bin_size; i++)
     {
-        /* Beginning of line */
-        if(i%16 == 0)
+      /* Début de ligne */
+      if(i%16 == 0)
         {
-            /* End of the previous line */
-            if(offset > 0)
+          /* Fin de la ligne précédente */
+          if(offset > 0)
             {
-                strcpy(&file_data[offset],"\n");
-                offset++;
+              strcpy(&file_data[offset],"\n");
+              offset++;
             }
-            /* Beginning of line */
-            strcpy(&file_data[offset]," HEX  ");
-            offset += (int) strlen(" HEX  ");
+          /* Début de ligne */
+          strcpy(&file_data[offset]," HEX  ");
+          offset += (int) strlen(" HEX  ");
         }
 
-        /* We place a value */
-        sprintf(&file_data[offset],"%02X",file_bin_data[i]);
-        offset += 2;
+      /* On place une valeur */
+      sprintf(&file_data[offset],"%02X",file_bin_data[i]);
+      offset += 2;
 
-        /* We add the , */
-        if(i%16 != 15 && i != (int)(file_bin_size-1))
+      /* On ajoute la , */
+      if(i%16 != 15 && i != (file_bin_size-1))
         {
-            strcpy(&file_data[offset],",");
-            offset++;
+          strcpy(&file_data[offset],",");
+          offset++;
         }
     }
-    /* End of the Last line */
-    strcat(file_data,"\n");
-    file_size = (int) strlen(file_data);
+  /* Fin de la dernière ligne */
+  strcat(file_data,"\n");
+  file_size = (int) strlen(file_data);
 
-    /* Memory release of binary File */
-    free(file_bin_data);
+  /* Libération mémoire du fichier Binaire */
+  free(file_bin_data);
 
-    /* Allocate memory */
-    current_file = (struct source_file *) calloc(1,sizeof(struct source_file));
-    if(current_file == NULL)
+  /* Allocation mémoire */
+  current_file = (struct source_file *) calloc(1,sizeof(struct source_file));
+  if(current_file == NULL)
     {
-        free(file_data);
-        return(NULL);
+      free(file_data);
+      return(NULL);
     }
 
-    /* Data */
-    current_file->data = (unsigned char *) file_data;
+  /* Data */
+  current_file->data = (unsigned char *) file_data;
 
-    /* File Path */
-    current_file->file_path = strdup(file_path);
+  /* File Path */
+  current_file->file_path = strdup(file_path);
 
-    /* Build file name */
-    current_file->file_name = strdup(file_name);
+  /* Build file name */
+  current_file->file_name = strdup(file_name);
     
-    /* File number */
-    current_file->file_number = file_number;
+  /* File number */
+  current_file->file_number = file_number;
 
-    /* Count the number of rows */
-    nb_line = 1;
-    for(int i = 0; i < (int)file_size; i++)
+  /* Compte le nombre de lignes */
+  for(i=0,nb_line=1; i<file_size; i++)
+    if(current_file->data[i] == '\n')
+      nb_line++;
+
+  /* Allocation mémoire du tableau de ligne */
+  current_file->tab_line = (char **) calloc(nb_line,sizeof(char *));
+
+  /* Vérification des allocations mémoires */
+  if(current_file->file_path == NULL || current_file->file_name == NULL || current_file->tab_line == NULL)
     {
-        if(current_file->data[i] == 0X0A)
-            nb_line++;
+      mem_free_sourcefile(current_file,0);
+      return(NULL);
     }
 
-    /* Allocate memory for table of ligne */
-    current_file->tab_line = (char **) calloc(nb_line,sizeof(char *));
-
-    /* Verification of memory allocations */
-    if(current_file->file_path == NULL || current_file->file_name == NULL || current_file->tab_line == NULL)
+  /** Détermine le début de chaque ligne **/
+  begin_line = (char *) current_file->data;
+  for(i=0; begin_line; i++)
     {
-        mem_free_sourcefile(current_file,0);
-        return(NULL);
+      /* Conserve un pointeur sur le début de ligne */
+      current_file->tab_line[i] = begin_line;
+
+      /* Fin de ligne */
+      end_line = strchr(begin_line,'\n');
+      if(end_line != NULL)
+        *end_line = '\0';
+
+      /* Ligne suivante */
+      begin_line = (end_line == NULL) ? NULL : end_line+1;
     }
+  current_file->nb_line = i;
 
-    /** Determine the beginning of each line **/
-    begin_line = (char *) current_file->data;
-    int line = 0;
-    for(; begin_line; line++)
+  /** Création des lignes **/
+  for(i=0; i<current_file->nb_line; i++)
     {
-        /* Keep a pointer to the beginning of line */
-        current_file->tab_line[line] = begin_line;
-
-        /* End of line */
-        end_line = strchr(begin_line, 0x0A);
-        if(end_line != NULL)
+      /* Décodage de la ligne */
+      current_line = BuildSourceLine(current_file,i);
+      if(current_line == NULL)
         {
-            begin_line = end_line+1;
-            if( *(end_line-1) == 0x0D )
-                --end_line;
-            *end_line = '\0';
-        }
-        else
-        {
-            begin_line = NULL;
-        }
-    }
-    current_file->nb_line = line;
-
-    /** Create the lines **/
-    for(int i = 0; i < current_file->nb_line; i++)
-    {
-        /* Decoding of the line */
-        current_line = BuildSourceLine(current_file,i);
-        if(current_line == NULL)
-        {
-            mem_free_sourcefile(current_file,0);
-            sprintf(param->buffer_error,"Impossible to build source line %d",i);
-            my_RaiseError(ERROR_RAISE,param->buffer_error);
+          mem_free_sourcefile(current_file,0);
+          sprintf(param->buffer_error,"Impossible to build source line %d",i);
+          my_RaiseError(ERROR_RAISE,param->buffer_error);
         }
 
-        /* Attachment to the list */
-        if(current_file->first_line == NULL)
-            current_file->first_line = current_line;
-        else
-            current_file->last_line->next = current_line;
-        current_file->last_line = current_line;
+      /* Attachement à la liste */
+      if(current_file->first_line == NULL)
+        current_file->first_line = current_line;
+      else
+        current_file->last_line->next = current_line;
+      current_file->last_line = current_line;
     }
 
-    /* Return the structure */
-    return(current_file);
+  /* Renvoi la structure */
+  return(current_file);
 }
 
 
-/************************************************/
-/*  BuildObjectCode() :  Create the File Objet. */
-/************************************************/
+/****************************************************/
+/*  BuildObjectCode() :  Création du fichier Objet. */
+/****************************************************/
 int BuildObjectCode(struct omf_segment *current_omfsegment)
 {
-    BYTE checksum_byte = 0;
-    int i = 0, object_length = 0;
-    struct source_file *first_file = NULL;
-    struct source_line *current_line = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+  BYTE checksum_byte = 0;
+  int i, object_length;
+  struct source_file *first_file;
+  struct source_line *current_line;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /** Calculate the max size of the object **/
-    my_Memory(MEMORY_GET_FILE,&first_file,NULL,current_omfsegment);
-    for(object_length=0,current_line=first_file->first_line; current_line; current_line=current_line->next)
+  /** Calcul la taille max de l'object **/
+  my_Memory(MEMORY_GET_SOURCE_FILE,&first_file,NULL,current_omfsegment);
+  for(object_length=0,current_line=first_file->first_line; current_line; current_line=current_line->next)
     {
-        /* We do not take invalid lines */
-        if(current_line->is_valid == 0 || current_line->is_dum == 1)
-            continue;
+      /* On ne prend pas les lignes invalides */
+      if(current_line->is_valid == 0 || current_line->is_dum == 1)
+        continue;
 
-        /* For a Macro, we only take the call line */
-        if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
-            continue;
-        if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
-            continue;
+      /* Pour une Macro, on ne prend que la ligne d'appel */
+      if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
+        continue;
+      if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
+        continue;
 
-        /* Count matches the size of the object code */
-        object_length += current_line->nb_byte;
+      /* Comptabilise la taille du code objet */
+      object_length += current_line->nb_byte;
     }
 
-    /* Allocate memory */
-    current_omfsegment->object_code = (unsigned char *) calloc(object_length+1,sizeof(unsigned char));
-    if(current_omfsegment->object_code == NULL)
-        return(1);
+  /* Allocation mémoire */
+  current_omfsegment->object_code = (unsigned char *) calloc(object_length+1,sizeof(unsigned char));
+  if(current_omfsegment->object_code == NULL)
+    return(1);
 
-    /** Fill out structure of buffer objet **/
-    for(object_length=0,current_line=first_file->first_line; current_line; current_line=current_line->next)
+  /** Remplissage du buffer objet **/
+  for(object_length=0,current_line=first_file->first_line; current_line; current_line=current_line->next)
     {
-        /* We do not take invalid lines */
-        if(current_line->is_valid == 0 || current_line->is_dum == 1)
-            continue;
+      /* On ne prend pas les lignes invalides */
+      if(current_line->is_valid == 0 || current_line->is_dum == 1)
+        continue;
 
-        /* For a Macro, we only take the call line */
-        if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
-            continue;
-        if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
-            continue;
-        if(current_line->nb_byte == 0)         /* ERR */
-            continue;
+      /* Pour une Macro, on ne prend que la ligne d'appel */
+      if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
+        continue;
+      if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
+        continue;
+      if(current_line->nb_byte == 0)         /* ERR */
+        continue;
 
-        /** Place the object code **/
-        if(current_line->type == LINE_CODE)
+      /** Place le code objet **/
+      if(current_line->type == LINE_CODE)
         {
-            /* Opcode Byte + Operand Byte(s) */
-            current_omfsegment->object_code[object_length++] = current_line->opcode_byte;
-            memcpy(&current_omfsegment->object_code[object_length],current_line->operand_byte,current_line->nb_byte-1);
-            object_length += current_line->nb_byte-1;
+          /* Opcode Byte + Operand Byte(s) */
+          current_omfsegment->object_code[object_length++] = current_line->opcode_byte;
+          memcpy(&current_omfsegment->object_code[object_length],current_line->operand_byte,current_line->nb_byte-1);
+          object_length += current_line->nb_byte-1;
         }
-        else if(current_line->type == LINE_DATA && !my_stricmp(current_line->opcode_txt,"CHK"))
+      else if(current_line->type == LINE_DATA && !my_stricmp(current_line->opcode_txt,"CHK"))
         {
-            /* Calculates the checksum from the beginning */
-            for(i=0; i<object_length; i++)
-                checksum_byte = (i == 0) ? current_omfsegment->object_code[i] : (checksum_byte ^ current_omfsegment->object_code[i]);
+          /* Calcule le checksum depuis le début */
+          for(i=0; i<object_length; i++)
+            checksum_byte = (i == 0) ? current_omfsegment->object_code[i] : (checksum_byte ^ current_omfsegment->object_code[i]);
 
-            /* Checksum Byte */
-            current_omfsegment->object_code[object_length] = checksum_byte;
-            object_length++;
+          /* Checksum Byte */
+          current_omfsegment->object_code[object_length] = checksum_byte;
+          object_length++;
         }
-        else if(current_line->type == LINE_DATA)
+      else if(current_line->type == LINE_DATA)
         {
-            /* Data Byte(s) */
-            memcpy(&current_omfsegment->object_code[object_length],current_line->data,current_line->nb_byte);
-            object_length += current_line->nb_byte;
+          /* Data Byte(s) */
+          memcpy(&current_omfsegment->object_code[object_length],current_line->data,current_line->nb_byte);
+          object_length += current_line->nb_byte;
         }
     }
 
-    /* Object code size */
-    current_omfsegment->object_length = object_length;
+  /* Taille du code objet */
+  current_omfsegment->object_length = object_length;
 
-    /* OK */
-    return(0);
+  /* OK */
+  return(0);
 }
 
 
-/*********************************************************/
-/*  BuildObjectFile() :  Create the File Object on Disk. */
-/*********************************************************/
-int BuildObjectFile(char *output_folder_path, struct omf_segment *current_omfsegment, struct omf_project *current_omfproject)
+/*********************************************************************************************************/
+/*  BuildFixedAddressBinaryOutputFile() :  Création sur disque du fichier Fixed Address / Multi Segment. */
+/*********************************************************************************************************/
+int BuildFixedAddressBinaryOutputFile(struct omf_file *current_omffile, struct omf_project *current_omfproject)
 {
-    FILE *fd = NULL;
-    int nb_write = 0;
-    char file_path[1024];
-    struct source_file *first_file = NULL;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM, &param, NULL, NULL);
+  FILE *fd;
+  int nb_write;
+  char file_path[1024];
+  struct omf_segment *current_omfsegment;
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Retrieves the first Source file */
-    my_Memory(MEMORY_GET_FILE,&first_file,NULL,current_omfsegment);
+  /*** Création du fichier sur le disque ***/
+  strcpy(file_path,current_omffile->dsk_path);
 
-    /** Do we have a name yet? **/
-    if(strlen(current_omfsegment->object_name) == 0)
+  /* Information */
+  printf("     => Creating Object file '%s'\n",file_path);
+
+  /* Création du fichier */
+#if defined(WIN32) || defined(WIN64) 
+  fd = fopen(file_path,"wb+");
+#else
+  fd = fopen(file_path,"w+");
+#endif
+  if(fd == NULL)
     {
-        /* On utilise le Source file name */
-        strcpy(current_omfsegment->object_name,first_file->file_name);
-        for(int i = (int)strlen(current_omfsegment->object_name); i >= 0; i--)
+      printf("    Error : Can't create Object file '%s'.\n",file_path);
+      return(1);
+    }
+
+  /** Ecriture des Body des Segments dans le fichier (les uns derrière les autres s'il y en a plusieurs / file) **/
+  for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+    {
+      nb_write = (int) fwrite(current_omfsegment->object_code,1,current_omfsegment->object_length,fd);
+      if(nb_write != current_omfsegment->object_length)
         {
-            if(current_omfsegment->object_name[i] == '.')
-            {
-                current_omfsegment->object_name[i] = '\0';
-                break;
-            }
-        }
-    }
-
-    /** Have you a name for the File Output.txt ? **/
-    if(current_omfproject->nb_segment == 1)
-    {
-        if(strlen(param->output_file_path) == 0 || !my_stricmp(param->output_file_path,param->current_folder_path))
-            sprintf(param->output_file_path,"%s%s_Output.txt",param->current_folder_path,current_omfsegment->object_name);
-    }
-    else
-    {
-        if(strlen(param->output_file_path) == 0 || !my_stricmp(param->output_file_path,param->current_folder_path))
-            sprintf(param->output_file_path,"%s%s_S%02X_Output.txt",param->current_folder_path,current_omfsegment->object_name,current_omfsegment->segment_number);  /* Multi Segments */
-    }
-
-    /*** Create the file on disk ***/
-    sprintf(file_path,"%s%s",output_folder_path,current_omfsegment->object_name);
-
-    /* Information */
-    printf("     => Creating Object file '%s'\n",file_path);
-
-    /* Create the File */
-    fd = fopen(file_path,"wb+");
-    if(fd == NULL)
-    {
-        printf("    Error : Can't create Object file '%s'.\n",file_path);
-        return(1);
-    }
-
-    /* Write the object code to the File	 */
-    nb_write = (int) fwrite(current_omfsegment->object_code,1,current_omfsegment->object_length,fd);
-    if(nb_write != current_omfsegment->object_length)
-        printf("    Error : Can't write Object file '%s' data (%d bytes / %d bytes).\n",file_path,nb_write,current_omfsegment->object_length);
-    
-    /* Close the File */
-    fclose(fd);
-
-    /*** Updating the File FileInformation ***/
-    UpdateFileInformation(output_folder_path,current_omfsegment->object_name,current_omfproject);
-
-    /* OK */
-    return(0);
-}
-
-
-/*******************************************************************************************/
-/*  BuildSingleObjectFile() :  Create the File Single Binary Multi-Segment Object on Disk. */
-/*******************************************************************************************/
-int BuildSingleObjectFile(char *output_folder_path, int file_number, struct omf_project *current_omfproject)
-{
-    FILE *fd;
-    int nb_write;
-    char file_path[1024];
-    struct omf_segment *current_omfsegment;
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
-
-    /** Have you a name for the File Output.txt ? **/
-    if(strlen(param->output_file_path) == 0 || !my_stricmp(param->output_file_path,param->current_folder_path))
-        sprintf(param->output_file_path,"%s%s_Output.txt",param->current_folder_path,current_omfproject->dsk_name_tab[file_number]);
-
-    /*** Create the file on disk ***/
-    sprintf(file_path,"%s%s",output_folder_path,current_omfproject->dsk_name_tab[file_number]);
-
-    /* Information */
-    printf("     => Creating Object file '%s'\n",file_path);
-
-    /* Create the File */
-    fd = fopen(file_path,"wb+");
-    if(fd == NULL)
-    {
-        printf("    Error : Can't create Object file '%s'.\n",file_path);
-        return(1);
-    }
-
-    /** Writing the data in the segments one behind the other **/
-    for(current_omfsegment=current_omfproject->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
-    {
-        /* 1 Segment (only if it belongs to the File) */
-        if(current_omfsegment->file_number == (file_number+1))
-        {
-            nb_write = (int) fwrite(current_omfsegment->object_code,1,current_omfsegment->object_length,fd);
-            if(nb_write != current_omfsegment->object_length)
-            {
-                printf("    Error : Can't write Object file '%s' data (%d bytes / %d bytes).\n",file_path,nb_write,current_omfsegment->object_length);
-                break;
-            }
+          printf("    Error : Can't write Object file '%s' data (%d bytes / %d bytes).\n",file_path,nb_write,current_omfsegment->object_length);
+          break;
         }
     }
     
-    /* Close the File */
-    fclose(fd);
+  /* Fermeture du fichier */
+  fclose(fd);
 
-    /*** Updating the File _FileInformation ***/
-    UpdateFileInformation(output_folder_path,current_omfproject->dsk_name_tab[file_number],current_omfproject);
+  /*** Mise à jour du fichier _FileInformation ***/
+  UpdateFileInformation(current_omffile->dsk_path,current_omffile->dsk_name,current_omfproject);
 
-    /* OK */
-    return(0);
-}
-
-/**********************************************/
-/*  print_symbols() :  print the symbol data. */
-/**********************************************/
-void print_symbols(FILE *fd, int columns, struct omf_segment *current_omfsegment)
-{
-    fprintf(fd, "  Equates:\n");
-    int column = columns;
-    for(struct equivalence *current = current_omfsegment->first_equivalence; current; current= current->next )
-    {
-        
-        char *value = current->valueStr;
-
-        fprintf(fd, "%16s = %7s", current->name, value);
-        if( !--column )
-        {
-            fprintf(fd, "\n");
-            column = columns;
-        }
-    }
-
-	if( column != columns )
-	    fprintf(fd, "\n");
-    fprintf(fd, "\n");
-
-    fprintf(fd, "  Labels:\n");
-    column = columns;
-    for(struct label *current = current_omfsegment->first_label; current; current= current->next )
-    {
-        char addr[16];
-        int address = current->line->address;
-
-        snprintf(addr, 16, "$%X", address);
-        fprintf(fd, "%16s = %7s", current->name, addr);
-        if( !--column )
-        {
-            fprintf(fd, "\n");
-            column = columns;
-        }
-    }
-
-    if( column != columns )
-	    fprintf(fd, "\n");
-    fprintf(fd, "\n");
-}
-
-/*********************************************/
-/*  dump_symbols() :  dump the symbol table. */
-/*********************************************/
-void dump_symbols(FILE *fd, int columns, struct omf_segment *current_omfsegment)
-{
-    my_Memory(MEMORY_SORT_LABEL_V, NULL, NULL, current_omfsegment);
-    my_Memory(MEMORY_SORT_EQUIVALENCE_V, NULL, NULL, current_omfsegment);
-
-    fprintf(fd, "\nSymbol Table - Numerical Order\n\n");
-    print_symbols(fd, columns, current_omfsegment);
-
-    my_Memory(MEMORY_SORT_LABEL, NULL, NULL, current_omfsegment);
-    my_Memory(MEMORY_SORT_EQUIVALENCE, NULL, NULL, current_omfsegment);
-
-    fprintf(fd, "\nSymbol Table - Alphabetical Order\n\n");
-    print_symbols(fd, columns, current_omfsegment);
+  /* OK */
+  return(0);
 }
 
 
-/**********************************************************/
-/*  CreateOutputFile() :  Create the File of Text Output. */
-/**********************************************************/
-int CreateOutputFile(char *file_path, int verbose_mode, int symbol_mode, struct omf_segment *current_omfsegment, struct omf_project *current_omfproject)
+/*******************************************************************/
+/*  CreateTextOutputFile() :  Création du fichier de sortie Texte. */
+/*******************************************************************/
+int CreateTextOutputFile(char *file_path, struct omf_segment *current_omfsegment, struct omf_project *current_omfproject)
 {
-    FILE *fd;
-    int i, j, nb_byte_left, is_multi_fixed, nb_byte;
-    int file_length;
-    int label_length;
-    int opcode_length;
-    int operand_length;
-    char buffer_format[256];
-    struct source_file *first_file;
-    struct source_file *current_file;
-    struct source_line *current_line;
-    char *line_type_tab[] = {"Unknown   ", "Comment    ", "Directive  ", "Equivalence", "Variable   ", "Code       ", "Data       ", "Macro      ", "Empty      ", "Global     ", "External   "};
-    struct parameter *param;
-    my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+  FILE *fd;
+  int i, j, nb_byte_left, nb_byte;
+  int file_length;
+  int label_length;
+  int opcode_length;
+  int operand_length;
+  char buffer_format[256];
+  struct source_file *first_file;
+  struct source_file *current_file;
+  struct source_line *current_line;
+  char *line_type_tab[] = {"Unknown   ", "Comment    ", "Directive  ", "Equivalence", "Variable   ", "Code       ", "Data       ", "Macro      ", "Empty      ", "Global     ", "External   "};
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
 
-    /* Init */
-    is_multi_fixed = 0;
+  /* Taille des noms de fichiers */
+  file_length = 0;
+  my_Memory(MEMORY_GET_SOURCE_FILE,&first_file,NULL,current_omfsegment);  
+  if(first_file == NULL)
+    return(1);
+  for(current_file=first_file; current_file; current_file=current_file->next)
+    if(file_length < (int) strlen(current_file->file_name))
+      file_length = (int) strlen(current_file->file_name);
+  if(file_length < 4)
+    file_length = 4;
 
-    /* Is it a projet multi-segment fixed */
-    if(current_omfproject != NULL)
-        if(current_omfproject->is_multi_fixed == 1)
-            is_multi_fixed = 1;
+  /* Information */
+  printf("     => Creating Output file '%s'\n",file_path);
 
-    /* Size of names of Files */
-    file_length = 0;
-    my_Memory(MEMORY_GET_FILE,&first_file,NULL,current_omfsegment);
-    if(first_file == NULL)
-        return(1);
-    for(current_file=first_file; current_file; current_file=current_file->next)
+  /* Création du fichier de sortie */
+  fd = fopen(file_path,"w+");
+  if(fd == NULL)
+    return(1);
+
+  /** Taille des marges **/
+  label_length   = 10;
+  opcode_length  = 4;
+  operand_length = 15;
+  for(current_line=first_file->first_line; current_line; current_line=current_line->next)
     {
-        if(file_length < (int) strlen(current_file->file_name))
-            file_length = (int) strlen(current_file->file_name);
-    }
-    if(file_length < 4)
-        file_length = 4;
+      /* On ne prend pas les lignes invalides */
+      if(current_line->is_valid == 0)
+        continue;
 
-    /* Information */
-    printf("     => Creating Output file '%s'\n",file_path);
+      /* Pour une Macro, on ne prend que la ligne d'appel */
+      if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
+        continue;
+      if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
+        continue;
 
-    /* Create the output file */
-    fd = fopen(file_path,"wb+");
-    if(fd == NULL)
-        return(1);
+      /* On aligne la colonne du label sur le plus large */
+      if((int) strlen(current_line->label_txt) > label_length)
+        label_length = (int) strlen(current_line->label_txt);
 
-    /** Taille des marges **/
-    label_length = 10;
-    opcode_length = 4;
-    operand_length = 15;
-    for(current_line=first_file->first_line; current_line; current_line=current_line->next)
-    {
-        /* We do not take invalid lines */
-        if(current_line->is_valid == 0)
-            continue;
+      /* On va regarde les opcode ayant un operand */
+      if((int) strlen(current_line->opcode_txt) > opcode_length && (int) strlen(current_line->operand_txt) > 0)
+        opcode_length = (int) strlen(current_line->opcode_txt);
 
-        /* For a Macro, we only take the call line */
-        if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
-            continue;
-        if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
-            continue;
-
-        /* Align the column of label on the widest */
-        if((int) strlen(current_line->label_txt) > label_length)
-            label_length = (int) strlen(current_line->label_txt);
-
-        /* Look at the opcode having an operand */
-        if((int) strlen(current_line->opcode_txt) > opcode_length && (int) strlen(current_line->operand_txt) > 0)
-            opcode_length = (int) strlen(current_line->opcode_txt);
-
-        /* We will watch the operand for a comment */
-        if((int) strlen(current_line->operand_txt) > operand_length && (int) strlen(current_line->comment_txt) > 0)
-            operand_length = (int) strlen(current_line->operand_txt);
-        if(operand_length > 21)
-            operand_length = 21;
+      /* On va regarder les operand ayant un commentaire */
+      if((int) strlen(current_line->operand_txt) > operand_length && (int) strlen(current_line->comment_txt) > 0)
+        operand_length = (int) strlen(current_line->operand_txt);
+      if(operand_length > 21)
+        operand_length = 21;
     }
 
-    /** Entity **/
-    /* Feature */
-    strcpy(param->buffer_line,"------+----");
-    for(i=0; i<file_length+2; i++)
-        strcat(param->buffer_line,"-");
-    strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+----------------------------------------------------------------------\n");
-    fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
-    /* WORDING */
-    strcpy(param->buffer_line," Line | # File");
-    for(i=0; i<file_length-2; i++)
-        strcat(param->buffer_line," ");
-    strcat(param->buffer_line,"  Line | Line Type   | MX |  Reloc  | Size | Address   Object Code |  Source Code\n");
-    fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
-    /* Feature */
-    strcpy(param->buffer_line,"------+----");
-    for(i=0; i<file_length+2; i++)
-        strcat(param->buffer_line,"-");
-    strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+----------------------------------------------------------------------\n");
-    fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+  /** Entête **/
+  /* Trait */
+  strcpy(param->buffer_line,"------+----");
+  for(i=0; i<file_length+2; i++)
+    strcat(param->buffer_line,"-");
+  strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+-------------------------------------------------------------------\n");
+  fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+  /* Libellé */
+  strcpy(param->buffer_line," Line | # File");
+  for(i=0; i<file_length-2; i++)
+    strcat(param->buffer_line," ");
+  strcat(param->buffer_line,"  Line | Line Type   | MX |  Reloc  | Size | Address   Object Code |  Source Code                                                      \n");
+  fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+  /* Trait */
+  strcpy(param->buffer_line,"------+----");
+  for(i=0; i<file_length+2; i++)
+    strcat(param->buffer_line,"-");
+  strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+-------------------------------------------------------------------\n");
+  fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
 
-    /*** Lines treatment ***/
-    for(current_line=first_file->first_line; current_line; current_line=current_line->next)
+  /*** Traitement des lignes ***/
+  for(current_line=first_file->first_line; current_line; current_line=current_line->next)
     {
-        /* We do not take invalid lines */
-        if(current_line->is_valid == 0)
-            continue;
+      /* On ne prend pas les lignes invalides */
+      if(current_line->is_valid == 0)
+        continue;
 
-        /* For a Macro, we only take the call line */
-        if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
-            continue;
-        /* We do not take the Directive unless they have a Label used */
-        if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
-            continue;
+      /* Pour une Macro, on ne prend que la ligne d'appel */
+      if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
+        continue;
+      /* On ne prend pas les Directive, sauf si elles ont un Label utilisé */
+      if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
+        continue;
 
-        /** Creation of the line **/
-        /* In case of Dump in Error, we can have Lines with a number of bytes of FFFFF */
-        nb_byte = current_line->nb_byte;
-        if(nb_byte == 0xFFFFF)
-            nb_byte = 0;
+      /** Création de la ligne **/
+      /* En cas de Dump en erreur, on peu avoir des Tailles de lignes avec des FFFFF */
+      nb_byte = current_line->nb_byte;
+      if(nb_byte == 0xFFFFF)
+        nb_byte = 0;
 
-        /* Number of the line + File name + Number of the line of File */
-        sprintf(buffer_format,"%%5d | %%2d %%%ds  %%5d",file_length);
-        sprintf(param->buffer_line,buffer_format,current_line->line_number,current_line->file->file_number,current_line->file->file_name,current_line->file_line_number);
+      /* Numéro de la ligne + Nom du fichier + Numéro de la ligne du fichier */
+      sprintf(buffer_format,"%%5d | %%2d %%%ds  %%5d",file_length);
+      sprintf(param->buffer_line,buffer_format,current_line->line_number,current_line->file->file_number,current_line->file->file_name,current_line->file_line_number);
 
-        /* Type | MX |  Reloc  | Num Bytes | Address */
-        sprintf(&param->buffer_line[strlen(param->buffer_line)]," | %s | %s%s |%s| %4d | %02X/%04X",
-                (current_line->is_dum==1)?"Dum        ":line_type_tab[current_line->type],
-                current_line->m,current_line->x,current_line->reloc,nb_byte,current_line->bank,(WORD)current_line->address);
+      /* Type | MX |  Reloc  | Taille | Address */
+      sprintf(&param->buffer_line[strlen(param->buffer_line)]," | %s | %s%s |%s| %4d | %02X/%04X",
+              (current_line->is_dum==1)?"Dum        ":line_type_tab[current_line->type],
+              current_line->m,current_line->x,current_line->reloc,nb_byte,current_line->bank,(WORD)current_line->address);
 
-        /* Comment */
-        if(current_line->type == LINE_COMMENT)
+      /* Découpage */
+      if(current_line->type == LINE_COMMENT)
         {
-            strcat(param->buffer_line,"               | ");
-            strcat(param->buffer_line,current_line->line_data);
+          strcat(param->buffer_line,"               | ");
+          strcat(param->buffer_line,current_line->line_data);
         }
-        else
+      else
         {
-            /** Code objet **/
-            if(current_line->type == LINE_CODE)
+          /** Code objet **/
+          if(current_line->type == LINE_CODE)
             {
-                /* Opcode Bye + Operand Byte */
-                sprintf(param->buffer_value," : %02X ",current_line->opcode_byte);
-                for(i=0; i<nb_byte-1; i++)
-                    sprintf(&param->buffer_value[strlen(param->buffer_value)],"%02X ",current_line->operand_byte[i]);
-                strcat(param->buffer_value,"               ");
+              /* Opcode Bye + Operand Byte */
+              sprintf(param->buffer_value," : %02X ",current_line->opcode_byte);
+              for(i=0; i<nb_byte-1; i++)
+                sprintf(&param->buffer_value[strlen(param->buffer_value)],"%02X ",current_line->operand_byte[i]);
+              strcat(param->buffer_value,"               ");
             }
-            else if(current_line->type == LINE_DATA)
+          else if(current_line->type == LINE_DATA)
             {
-                /* Operand Byte */
-                strcpy(param->buffer_value," : ");
-                for(i=0; i<MIN(4,nb_byte); i++)
-                    sprintf(&param->buffer_value[strlen(param->buffer_value)],"%02X ",current_line->data[i]);
-                strcat(param->buffer_value,"               ");
+              /* Operand Byte */
+              strcpy(param->buffer_value," : ");
+              for(i=0; i<MIN(4,nb_byte); i++)
+                sprintf(&param->buffer_value[strlen(param->buffer_value)],"%02X ",current_line->data[i]);
+              strcat(param->buffer_value,"               ");
             }
-            else
-                strcpy(param->buffer_value,"               ");
-            param->buffer_value[15] = '|';
-            param->buffer_value[16] = '\0';
-            strcat(param->buffer_line,param->buffer_value);
+          else
+            strcpy(param->buffer_value,"               ");
+          param->buffer_value[15] = '|';
+          param->buffer_value[16] = '\0';
+          strcat(param->buffer_line,param->buffer_value);
 
-            /* Label */
-            sprintf(buffer_format," %%-%ds",label_length);
-            sprintf(param->buffer_value,buffer_format,current_line->label_txt);
-            strcat(param->buffer_line,param->buffer_value);
+          /* Label */
+          sprintf(buffer_format," %%-%ds",label_length);
+          sprintf(param->buffer_value,buffer_format,current_line->label_txt);
+          strcat(param->buffer_line,param->buffer_value);
 
-            /* Opcode */
-            sprintf(buffer_format,"  %%-%ds",opcode_length);
-            sprintf(param->buffer_value,buffer_format,(current_line->type == LINE_EMPTY)?"":current_line->opcode_txt);
-            strcat(param->buffer_line,param->buffer_value);
+          /* Opcode */
+          sprintf(buffer_format,"  %%-%ds",opcode_length);
+          sprintf(param->buffer_value,buffer_format,(current_line->type == LINE_EMPTY)?"":current_line->opcode_txt);
+          strcat(param->buffer_line,param->buffer_value);
 
-            /* Operand */
-            sprintf(buffer_format,"  %%-%ds",operand_length);
-            sprintf(param->buffer_value,buffer_format,(current_line->type == LINE_EMPTY)?"":current_line->operand_txt);
-            strcat(param->buffer_line,param->buffer_value);
+          /* Operand */
+          sprintf(buffer_format,"  %%-%ds",operand_length);
+          sprintf(param->buffer_value,buffer_format,(current_line->type == LINE_EMPTY)?"":current_line->operand_txt);
+          strcat(param->buffer_line,param->buffer_value);
 
-            /* Comment */
-            strcat(param->buffer_line,current_line->comment_txt);
+          /* Commentaire */
+          strcat(param->buffer_line,current_line->comment_txt);
         }
 
-        /* End of line */
-        strcat(param->buffer_line,"\n");
+      /* Fin de ligne */
+      strcat(param->buffer_line,"\n");
 
-        /* Write the line in the File */
-        fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+      /* Ecriture de la ligne dans le fichier */
+      fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
 
-        /** Finalize the Data > 4 bytes **/
-        if(current_line->type == LINE_DATA && nb_byte > 4)
+      /** On va finaliser la partie Data > 4 bytes **/
+      if(current_line->type == LINE_DATA && nb_byte > 4)
         {
-            for(i=4; i<nb_byte; i+=4)
+          for(i=4; i<nb_byte; i+=4)
             {
-                /* Number of bytes still available */
-                nb_byte_left = (nb_byte-i) >= 4 ? 4 : nb_byte-i;
+              /* Nombre d'octets encore dispo */
+              nb_byte_left = (nb_byte-i) >= 4 ? 4 : nb_byte-i;
 
-                /* Empty line */
-                strcpy(param->buffer_line,"      |    ");
-                for(j=0; j<file_length+2; j++)
-                    strcat(param->buffer_line," ");
-                strcat(param->buffer_line,"      |             |    |         |      |           ");
-                for(j=0; j<4; j++)
+              /* Ligne vide */
+              strcpy(param->buffer_line,"      |    ");
+              for(j=0; j<file_length+2; j++)
+                strcat(param->buffer_line," ");
+              strcat(param->buffer_line,"      |             |    |         |      |           ");
+              for(j=0; j<4; j++)
                 {
-                    if(j < nb_byte_left)
-                        sprintf(&param->buffer_line[strlen(param->buffer_line)],"%02X ",current_line->data[i+j]);
-                    else
-                        strcat(param->buffer_line,"   ");
+                  if(j < nb_byte_left)
+                    sprintf(&param->buffer_line[strlen(param->buffer_line)],"%02X ",current_line->data[i+j]);
+                  else
+                    strcat(param->buffer_line,"   ");
                 }
-                strcat(param->buffer_line,"|\n");
-                fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+              strcat(param->buffer_line,"|\n");
+              fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
             }
         }
     }
 
-    /* Feature */
-    strcpy(param->buffer_line,"------+----");
-    for(i=0; i<file_length+2; i++)
-        strcat(param->buffer_line,"-");
-    strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+----------------------------------------------------------------------\n");
-    fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+  /* Trait */
+  strcpy(param->buffer_line,"------+----");
+  for(i=0; i<file_length+2; i++)
+    strcat(param->buffer_line,"-");
+  strcat(param->buffer_line,"------+-------------+----+---------+------+-----------------------+-------------------------------------------------------------------\n");
+  fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
 
-	if( verbose_mode > 0 || symbol_mode > 0 )
-    {
-        for(struct equivalence *current = current_omfsegment->first_equivalence; current; current= current->next )
-        {
-            int64_t value;
+  /* Fermeture du fichier */
+  fclose(fd);
 
-            if( STATUS_UNKNWON != QuickConditionEvaluate(current->source_line, &value, current_omfsegment) )
-            {
-                current->value = value;
-            }
-        }
-    }
-
-    if( verbose_mode > 0 )
-	    dump_symbols(fd, verbose_mode, current_omfsegment);
-
-    if( symbol_mode > 0 )
-	    dump_symbols(stdout, symbol_mode, current_omfsegment);
-
-    /* Close the File */
-    fclose(fd);
-
-    /* OK */
-    return(0);
+  /* OK */
+  return(0);
 }
 
-/**************************************************************************/
-/*  mem_free_sourcefile() :  Memory release of the source_file structure. */
-/**************************************************************************/
+
+/**********************************************************/
+/*  CreateSymbolFile() :  Création du fichier de Symbols. */
+/**********************************************************/
+int CreateSymbolFile(char *file_name, struct omf_project *current_omfproject)
+{
+  FILE *fd;
+  struct omf_segment *current_omfsegment;
+  struct omf_file *current_omffile;
+  char output_file_path[1024];
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /* Chemin du fichier Symbols.txt */
+  sprintf(output_file_path,"%s%s_Symbols.txt",param->project_folder_path,file_name);
+
+  /* Information */
+  printf("     => Creating Symbol file '%s'\n",output_file_path);
+
+  /* Création du fichier Symbole */
+  fd = fopen(output_file_path,"w+");
+  if(fd == NULL)
+    return(1);
+
+  /* Première ligne : Information */
+  fprintf(fd,"Segment Name;Segment Line;File Name;File Line;Address;Name;Type;Data Type;Size;MX;Reloc\n");
+
+  /** On va extraire les Symbols de tous les Segments (sauf l'ExpressLoad) **/
+  for(current_omffile=current_omfproject->first_file; current_omffile; current_omffile=current_omffile->next)
+    for(current_omfsegment=current_omffile->first_segment; current_omfsegment; current_omfsegment=current_omfsegment->next)
+      {
+        /* On ne Dump pas l'ExpressLoad */
+        if(current_omfsegment->segment_number == 1 && !my_stricmp(current_omfsegment->segment_name,"~ExpressLoad"))
+          continue;
+
+        /* Dump des Symbols de ce Segment */
+        DumpSegmentSymbol(fd,current_omfsegment,current_omfproject);
+      }
+
+  /* Fermeture du fichier */
+  fclose(fd);
+
+  /* OK */
+  return(0);
+}
+
+
+/************************************************************/
+/*  DumpSegmentSymbol() :  Dump des Symboles de ce Segment. */
+/************************************************************/
+static int DumpSegmentSymbol(FILE *fd, struct omf_segment *current_omfsegment, struct omf_project *current_omfproject)
+{
+  int size;
+  struct source_file *first_file;
+  struct source_line *current_line;
+  struct source_line *other_line;
+  char buffer_line_type[256];
+  char buffer_data_type[256];
+  char buffer_reloc[256];
+  struct parameter *param;
+  my_Memory(MEMORY_GET_PARAM,&param,NULL,NULL);
+
+  /* Première ligne du Segment */
+  my_Memory(MEMORY_GET_SOURCE_FILE,&first_file,NULL,current_omfsegment);  
+  if(first_file == NULL)
+    return(1);
+
+  /*** Traitement des lignes ***/
+  for(current_line=first_file->first_line; current_line; current_line=current_line->next)
+    {
+      /* On ne prend pas les lignes invalides */
+      if(current_line->is_valid == 0)
+        continue;
+
+      /* Pour une Macro, on ne prend que la ligne d'appel */
+      if(current_line->type == LINE_MACRO && current_line->is_in_source == 0)
+        continue;
+      /* On ne prend pas les Directive, sauf si elles ont un Label utilisé */
+      if(current_line->type == LINE_DIRECTIVE && current_line->is_in_source == 0)
+        continue;
+      /* Ligne ne contenant qu'un commentaire */
+      if(current_line->type == LINE_COMMENT)
+        continue;
+      /* Ligne ne contenant qu'une Directive */
+      if(current_line->type == LINE_DIRECTIVE)
+        continue;
+      /* Ligne ne contenant qu'une Equivalence */
+      if(current_line->type == LINE_EQUIVALENCE)
+        continue;
+      /* Label Externe définissant une adresse d'un autre segment */
+      if(current_line->type == LINE_EXTERNAL)
+        continue;
+      /* Ligne sans Label */
+      if(strlen(current_line->label_txt) == 0 && !strcmp(current_line->reloc,"         "))
+        continue;
+
+      /* Taille de la ligne */
+      size = (current_line->nb_byte == 0xFFFF) ? 0 : current_line->nb_byte;
+
+      /** Type de la ligne **/
+      strcpy(buffer_line_type,"");
+      strcpy(buffer_data_type,"");
+      if(current_line->type == LINE_CODE)
+        strcpy(buffer_line_type,"Code");
+      else if(current_line->type == LINE_DATA)
+        {
+          strcpy(buffer_line_type,"Data");
+          strcpy(buffer_data_type,current_line->opcode_txt);
+        }
+      else if(current_line->type == LINE_GLOBAL || current_line->type == LINE_EMPTY || current_line->type == LINE_MACRO)
+        {
+          /* C'est une ligne Global/Empty/Macro, on cherche le Type + Size dans les lignes suivantes */
+          if(current_line->type == LINE_GLOBAL)
+            strcpy(buffer_line_type,"Global");
+          else if(current_line->type == LINE_EMPTY)
+            strcpy(buffer_line_type,"Empty");
+          else if(current_line->type == LINE_MACRO)
+            strcpy(buffer_line_type,"Macro");
+          for(other_line = current_line->next; other_line; other_line = other_line->next)
+            {
+              if(current_line->address != other_line->address)
+                break;
+              if(other_line->type == LINE_CODE)
+                {
+                  strcpy(buffer_line_type,"Code");
+                  size = (other_line->nb_byte == 0xFFFF) ? 0 : other_line->nb_byte;
+                  break;
+                }
+              else if(other_line->type == LINE_DATA)
+                {
+                  strcpy(buffer_line_type,"Data");
+                  strcpy(buffer_data_type,other_line->opcode_txt);
+                  size = (other_line->nb_byte == 0xFFFF) ? 0 : other_line->nb_byte;
+                  break;
+                }
+            }
+        }
+
+      /* Reloc */
+      strcpy(buffer_reloc,current_line->reloc);
+      CleanBuffer(buffer_reloc);
+
+      /** Nom du Segment / Segment Line / File Name / File Line / Address / Type / Data Type / Size / MX / Reloc **/
+      sprintf(param->buffer_line,"%s;%d;%s;%d;%02X/%04X;%s;%s;%s;%d;%s%s;%s",
+                                 current_omfsegment->segment_name,
+                                 current_line->line_number,
+                                 current_line->file->file_name,
+                                 current_line->file_line_number,
+                                 current_line->bank,
+                                 (WORD)current_line->address,
+                                 current_line->label_txt,
+                                 buffer_line_type,
+                                 buffer_data_type,
+                                 size,
+                                 current_line->m,current_line->x,
+                                 buffer_reloc);
+
+      /* Fin de ligne */
+      strcat(param->buffer_line,"\n");
+
+      /* Ecriture de la ligne dans le fichier */
+      fwrite(param->buffer_line,1,strlen(param->buffer_line),fd);
+    }
+
+  /* OK */
+  return(0);
+}
+
+
+/*****************************************************************************/
+/*  mem_free_sourcefile() :  Libération mémoire de la structure source_file. */
+/*****************************************************************************/
 void mem_free_sourcefile(struct source_file *current_sourcefile, int free_line)
 {
-    struct source_line *current_line;
-    struct source_line *next_line;
+  struct source_line *current_line;
+  struct source_line *next_line;
 
-    if(current_sourcefile)
+  if(current_sourcefile)
     {
-        if(current_sourcefile->file_path)
-            free(current_sourcefile->file_path);
+      if(current_sourcefile->file_path)
+        free(current_sourcefile->file_path);
 
-        if(current_sourcefile->file_name)
-            free(current_sourcefile->file_name);
+      if(current_sourcefile->file_name)
+        free(current_sourcefile->file_name);
 
-        if(current_sourcefile->data)
-            free(current_sourcefile->data);
+      if(current_sourcefile->data)
+        free(current_sourcefile->data);
 
-        if(current_sourcefile->tab_line)
-            free(current_sourcefile->tab_line);
+      if(current_sourcefile->tab_line)
+        free(current_sourcefile->tab_line);
 
-        if(free_line == 1)
+      if(free_line == 1)
         {
-            for(current_line=current_sourcefile->first_line; current_line; )
+          for(current_line=current_sourcefile->first_line; current_line; )
             {
-                next_line = current_line->next;
-                mem_free_sourceline(current_line);
-                current_line = next_line;
+              next_line = current_line->next;
+              mem_free_sourceline(current_line);
+              current_line = next_line;
             }
         }
 
-        free(current_sourcefile);
+      free(current_sourcefile);
     }
 }
 

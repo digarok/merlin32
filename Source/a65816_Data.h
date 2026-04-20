@@ -1,9 +1,9 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_Data.h : Header for the generation of Data.                */
+/*  a65816_Data.h : Header pour la génération des Data.                */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
 int BuildAllDataLineSize(struct omf_segment *);

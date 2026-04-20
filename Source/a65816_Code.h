@@ -1,9 +1,9 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_Code.h : Header for the generation of the object code.      */
+/*  a65816_Code.h : Header pour la génération du Code objet.           */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
 int BuildAllCodeLineSize(struct omf_segment *current_omfsegment);

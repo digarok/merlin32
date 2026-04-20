@@ -1,9 +1,9 @@
 /***********************************************************************/
 /*                                                                     */
-/*  a65816_File.h : Header for file management.                        */
+/*  a65816_File.h : Header pour la gestion des fichiers.               */
 /*                                                                     */
 /***********************************************************************/
-/*  Author : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
+/*  Auteur : Olivier ZARDINI  *  Brutal Deluxe Software  *  Janv 2011  */
 /***********************************************************************/
 
 struct source_file 
@@ -17,19 +17,19 @@ struct source_file
   int nb_line;
   char **tab_line;
 
-  struct source_line *first_line;    /* Line of this Source file */
+  struct source_line *first_line;    /* Ligne de ce fichier Source */
   struct source_line *last_line;
 
   struct source_file *next;
 };
 
-int LoadAllSourceFile(char *,char *,struct omf_segment *);
+int LoadAllSourceFile(char *,struct omf_segment *);
 struct source_file *LoadOneSourceFile(char *,char *,int);
 struct source_file *LoadOneBinaryFile(char *,char *,int);
 int BuildObjectCode(struct omf_segment *);
-int CreateOutputFile(char *,int verbose_mode, int symbol_mode, struct omf_segment *,struct omf_project *);
-int BuildObjectFile(char *,struct omf_segment *,struct omf_project *);
-int BuildSingleObjectFile(char *,int,struct omf_project *);
+int CreateTextOutputFile(char *,struct omf_segment *,struct omf_project *);
+int CreateSymbolFile(char *,struct omf_project *);
+int BuildFixedAddressBinaryOutputFile(struct omf_file *,struct omf_project *);
 void mem_free_sourcefile(struct source_file *,int);
 
 /***********************************************************************/
