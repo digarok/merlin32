@@ -1334,7 +1334,7 @@ void my_Memory(int code, void *data, void *value, struct omf_segment *current_om
 
 
 /****************************************************/
-/*  my_stricmp() : Case insensitive string compare. */
+/*  my_intcmp() : Compare integers and return if less-than, greater, or equal */
 /****************************************************/
 int my_intcmp(int int1, int int2)
 {
@@ -1347,7 +1347,7 @@ int my_intcmp(int int1, int int2)
 }
 
 /******************************************************/
-/*  my_stri64cmp() : Case insensitive string compare. */
+/*  my_int64cmp() : Compare integers and return if less-than, greater, or equal */
 /******************************************************/
 int my_int64cmp(int64_t int1, int64_t int2)
 {
@@ -1483,7 +1483,7 @@ char *GetFileProperCasePath(char *file_path_arg)
     if(file_path_arg[0] != '/')
     {
         /* Current directory */
-        getcwd(folder_current,1024);
+        getcwd(folder_current, sizeof(folder_current));
         if(strlen(folder_current) > 0)
             if(folder_current[strlen(folder_current)-1] != '/')
                 strcat(folder_current,"/");
@@ -5163,6 +5163,10 @@ int IsProdosName(char *file_name)
 /***********************************************************/
 void BuildAbsolutePath(char *file_name, char *folder_path, char *file_path_rtn)
 {
+    char buf[4096];
+    char *buf_ptr;
+    char *real_ptr;
+
     /* Init */
     strcpy(file_path_rtn,file_name);
 
@@ -5170,12 +5174,50 @@ void BuildAbsolutePath(char *file_name, char *folder_path, char *file_path_rtn)
     if(file_name[1] == ':' || file_name[0] == '/')
         return;
 
+    /* empty folder_path gets cwd */
+    if (strlen(folder_path) == 0) {
+        getcwd(folder_path, 1023);
+        folder_path[1023] = '\0';
+    }
+
+    /* append a trailing separator */
+    if (strlen(folder_path) <= 1022) {
+        /* point to the \0 terminator */
+        buf_ptr = folder_path + strlen(folder_path);
+
+        /* add trailing slash to folder_path if missing */
+        if (*(buf_ptr-1) != '/' && *(buf_ptr-1) != '\\') {
+            *buf_ptr = *FOLDER_SEPARATOR;
+            *++buf_ptr = '\0';
+        }
+    }
+
     /* Folder Path + File Name */
     strcpy(file_path_rtn,folder_path);
+
     if(file_name[0] == '/' || file_name[0] == '\\')
-        strcat(file_path_rtn,&file_name[1]);
-    else
-        strcat(file_path_rtn,file_name);
+        strcat(file_path_rtn, &file_name[1]);
+    else {
+        /* expand and correct the path using stdlib realpath */
+        char *buf_ptr = strncpy(&buf[0], folder_path, sizeof(buf));
+
+        if (buf_ptr == &buf[0] && my_stricmp(buf_ptr, folder_path) == 0) {
+            /* append filename */
+            strcat(&buf[0], file_name);
+
+            /* set the corrected full path */
+            char * real_ptr = realpath(&buf[0], file_path_rtn);
+            if (file_path_rtn == real_ptr) {
+                return; /* bam! */
+            } else {
+                /* fallback to original behavior */
+                strcat(file_path_rtn,file_name);
+            }
+        } else {
+            /* fallback to original behavior */
+            strcat(file_path_rtn,file_name);
+        }
+    }
 }
 
 
